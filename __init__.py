@@ -41,7 +41,7 @@ def _check_dependencies(iface: object) -> None:
             + '\n\nA análise de camadas RASTER não funcionará.\n\n'
             'Para instalar, abra o OSGeo4W Shell como administrador e execute:\n'
             f'  pip install {" ".join(missing)}\n\n'
-            'Consulte o arquivo README.txt do plugin para mais detalhes.'
+            'Consulte o arquivo README.md do plugin para mais detalhes.'
         )
     except Exception:
         pass

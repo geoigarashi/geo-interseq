@@ -3,18 +3,20 @@ name=GeoInterseQ
 qgisMinimumVersion=3.16
 qgisMaximumVersion=3.99
 description=Relata a área de interseção e o percentual de camadas vetoriais ou raster dentro de uma camada base de polígonos.
-about=Seleciona uma camada base (polígonos vetoriais) e múltiplas camadas analisadas (polígonos vetoriais ou rasters). Calcula a área de interseção e o percentual em relação à área total da camada analisada. Pode gerar camada de interseção temporária com simbologia e exportar resultados em CSV. Requisitos para análise raster: rasterio, shapely, pyproj (ver README.txt).
+about=Seleciona uma camada base (polígonos vetoriais) e múltiplas camadas analisadas (polígonos vetoriais ou rasters). Calcula a área de interseção e o percentual em relação à área total da camada analisada. Pode gerar camada de interseção temporária com simbologia e exportar resultados em CSV. Requisitos para análise raster: rasterio, shapely, pyproj (ver README.md).
 version=1.1.8
 changelog=1.1.8 — Filtro espacial vetorial configurável: checkbox + campo de buffer (km) para limitar análise vetorial ao entorno da base, usando índice espacial da camada analisada.
-  1.1.7 — Verificação de dependências no carregamento: aviso ao usuário se rasterio/shapely/pyproj estiverem ausentes; README.txt com instruções de instalação.
+  1.1.7 — Verificação de dependências no carregamento: aviso ao usuário se rasterio/shapely/pyproj estiverem ausentes; README.md com instruções de instalação.
   1.1.6 — Botão "Exportar CSV" na barra de botões: exporta toda a tabela de resultados em CSV (separador ";", UTF-8 BOM para compatibilidade com Excel).
   1.1.5 — Filtro de sobreposição vetorial aplicado em ambos os modos: feições com interseção < 1 m² (artefatos geométricos de borda) são omitidas do resultado.
   1.1.4 — Modo "% da feição analisada": feições vetoriais sem sobreposição real (área = 0) são omitidas do resultado.
   1.1.3 — Simbologia do raster (QgsPalettedRasterRenderer) aplicada automaticamente na camada vetorial gerada; cada raster gera sua própria camada de interseção.
   1.1.2 — Camada de interseção agora inclui geometrias vetoriais para classes raster (pixels touched dissolvidos por classe, reprojetados para EPSG:4326).
   1.1.1 — Paridade numérica com InfoGEO para análise raster: geometria reprojetada via pyproj, leitura de tile com janela sub-pixel via rasterio.windows.transform e denominador do percentual igual à soma das classes.
-author=Marcelo Seiji de Melo Matsumura
-maintainer=Clayton Igarashi <geoigarashi@gmail.com>
+author=Plat. Geo e Inovação
+maintainer=Plat. Geo e Inovação
+homepage=https://github.com/geoigarashi/geo-interseq
+repository=https://github.com/geoigarashi/geo-interseq
 category=Analysis
 icon=icon.png
 experimental=False
