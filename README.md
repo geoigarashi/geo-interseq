@@ -1,8 +1,8 @@
 # GeoInterseQ
 
 <p align="center">
-  <img src="icon.png" alt="Ícone GeoInterseQ" width="70" style="vertical-align: middle; margin-right: 20px;">
-  <img src="Logo-GEO-HQ.svg" alt="Logotipo Plataforma Geo e Inovação" width="220" style="vertical-align: middle;">
+  <img src="icon.png" alt="Ícone GeoInterseQ" height="120" style="vertical-align: middle; margin-right: 30px;">
+  <img src="Logo-GEO-HQ.svg" alt="Logotipo Plataforma Geo e Inovação" height="120" style="vertical-align: middle;">
 </p>
 
 **Versão 1.2.0** | **Autores:** Plat. Geo e Inovação
