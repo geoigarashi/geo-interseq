@@ -18,7 +18,7 @@ from qgis.PyQt.QtWidgets import (
     QDoubleSpinBox, QWidget, QTextBrowser
 )
 from qgis.PyQt.QtCore import Qt, QVariant, pyqtSignal, QMimeData
-from qgis.PyQt.QtGui import QIcon, QColor, QBrush, QFont, QPixmap
+from qgis.PyQt.QtGui import QIcon, QColor, QBrush, QFont, QPixmap, QGuiApplication
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsRasterLayer, QgsFeature, QgsGeometry,
     QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsWkbTypes,
@@ -219,7 +219,28 @@ class GeoInterseQDialog(QDialog):
         super().__init__(iface.mainWindow())
         self.iface: object = iface
         self.setWindowTitle('GeoInterseQ — Área e % da Analisada dentro da Base')
-        self.resize(1180, 620)
+
+        # Obter geometria da tela para dimensionamento responsivo
+        screen = QGuiApplication.primaryScreen()
+        screen_geom = screen.availableGeometry() if screen else None
+        screen_w: int = screen_geom.width() if screen_geom else 1920
+        screen_h: int = screen_geom.height() if screen_geom else 1080
+
+        # Ajuste dinâmico de altura e escala dos logos baseados na resolução da tela
+        dialog_height: int = 620
+        h_logo: int = 75
+
+        if screen_h < 768:
+            dialog_height = max(500, screen_h - 80)
+            h_logo = 60
+        elif screen_h < 900:
+            h_logo = 70
+        else:
+            dialog_height = 650
+            h_logo = 85
+
+        dialog_width: int = min(1180, screen_w - 40)
+        self.resize(dialog_width, dialog_height)
 
         # Layout horizontal principal (divide controles de ajuda)
         main_layout: QHBoxLayout = QHBoxLayout(self)
@@ -353,24 +374,42 @@ class GeoInterseQDialog(QDialog):
         right_layout.setContentsMargins(10, 0, 10, 0)
         right_widget.setFixedWidth(280)
 
-        # Logotipo da Plataforma
+        # Logos da Ferramenta e da Plataforma (lado a lado)
+        logos_layout = QHBoxLayout()
+        logos_layout.addStretch(1)
+
         logo_path = Path(__file__).parent / 'Logo-GEO-HQ.svg'
+        icon_path = Path(__file__).parent / 'icon.png'
+
+        has_any_logo: bool = False
+
+        # 1. Adiciona o ícone do plugin
+        if icon_path.exists():
+            lbl_icon = QLabel()
+            pix_icon = QPixmap(str(icon_path)).scaled(
+                h_logo, h_logo, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            lbl_icon.setPixmap(pix_icon)
+            lbl_icon.setFixedSize(h_logo, h_logo)
+            logos_layout.addWidget(lbl_icon)
+            has_any_logo = True
+
+        # Adiciona espaçamento se ambos existirem
+        if icon_path.exists() and logo_path.exists() and HAS_SVG_WIDGET:
+            logos_layout.addSpacing(12)
+
+        # 2. Adiciona o logotipo da plataforma
         if logo_path.exists() and HAS_SVG_WIDGET:
             logo_widget = QSvgWidget(str(logo_path))
-            logo_widget.setFixedSize(140, 178)
-            logo_container = QHBoxLayout()
-            logo_container.addStretch(1)
-            logo_container.addWidget(logo_widget)
-            logo_container.addStretch(1)
-            right_layout.addLayout(logo_container)
-        else:
-            icon_path = Path(__file__).parent / 'icon.png'
-            if icon_path.exists():
-                lbl_logo = QLabel()
-                pix = QPixmap(str(icon_path)).scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                lbl_logo.setPixmap(pix)
-                lbl_logo.setAlignment(Qt.AlignCenter)
-                right_layout.addWidget(lbl_logo)
+            w_logo = int(h_logo * 0.78)
+            logo_widget.setFixedSize(w_logo, h_logo)
+            logos_layout.addWidget(logo_widget)
+            has_any_logo = True
+
+        logos_layout.addStretch(1)
+
+        if has_any_logo:
+            right_layout.addLayout(logos_layout)
 
         # Navegador de Documentação/Tutorial em HTML
         tutorial_browser: QTextBrowser = QTextBrowser()
