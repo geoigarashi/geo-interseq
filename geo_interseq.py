@@ -692,6 +692,14 @@ class GeoInterseQDialog(QDialog):
             bbox.grow(buf_m / 111320.0)
             spatial_filter_rect = bbox
 
+        project = QgsProject.instance()
+        group = None
+        if create_layer:
+            root = project.layerTreeRoot()
+            group = root.findGroup("Resultados GeoInterseQ")
+            if group is None:
+                group = root.insertGroup(0, "Resultados GeoInterseQ")
+
         for i in range(self.overlay_list.count()):
             lyr: QgsMapLayer | None = self.overlay_list.item(i).data(Qt.UserRole)
 
@@ -703,7 +711,9 @@ class GeoInterseQDialog(QDialog):
                 )
                 if raster_out and create_layer:
                     raster_out.updateExtents()
-                    QgsProject.instance().addMapLayer(raster_out)
+                    project.addMapLayer(raster_out, False)
+                    if group:
+                        group.addLayer(raster_out)
             elif isinstance(lyr, QgsVectorLayer):
                 if lyr.geometryType() != QgsWkbTypes.PolygonGeometry:
                     continue
@@ -718,7 +728,9 @@ class GeoInterseQDialog(QDialog):
 
         if vec_out_layer and vec_out_used:
             vec_out_layer.updateExtents()
-            QgsProject.instance().addMapLayer(vec_out_layer)
+            project.addMapLayer(vec_out_layer, False)
+            if group:
+                group.addLayer(vec_out_layer)
 
         if self.table.rowCount() > 0:
             self.btn_export_csv.setEnabled(True)
