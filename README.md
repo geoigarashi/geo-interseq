@@ -1,5 +1,9 @@
 # GeoInterseQ
 
+<p align="center">
+  <img src="Logo-GEO-HQ.svg" alt="Logotipo Plataforma Geo e Inovação" width="250">
+</p>
+
 **Versão 1.1.8** | **Autores:** Plat. Geo e Inovação
 
 ---
