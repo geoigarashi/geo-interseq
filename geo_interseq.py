@@ -677,6 +677,7 @@ class GeoInterseQDialog(QDialog):
                 QgsField('layer', QVariant.String),
                 QgsField('class', QVariant.String),
                 QgsField('area_m2', QVariant.Double),
+                QgsField('area_ha', QVariant.Double),
                 QgsField('percent', QVariant.Double),
             ])
             vl.updateFields()
@@ -836,7 +837,9 @@ class GeoInterseQDialog(QDialog):
             if out_layer and inter_geom and not inter_geom.isEmpty():
                 out_feat = QgsFeature()
                 out_feat.setGeometry(inter_geom)
-                out_feat.setAttributes([_TYPE_VECTOR, lyr.name(), class_label, inter_area_m2, percent])
+                out_feat.setAttributes([
+                    _TYPE_VECTOR, lyr.name(), class_label, inter_area_m2, inter_area_m2 / 10000.0, percent
+                ])
                 out_layer.dataProvider().addFeatures([out_feat])
 
     def _process_raster_layer(
@@ -1166,15 +1169,15 @@ class GeoInterseQDialog(QDialog):
                 try:
                     feat = QgsFeature()
                     feat.setGeometry(QgsGeometry.fromWkt(geom_4326.wkt))
-                    feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
+                    feat.setAttributes([
+                        _TYPE_RASTER, lyr.name(), class_label, area_m2, area_m2 / 10000.0, percent
+                    ])
                     out_layer.dataProvider().addFeatures([feat])
                 except Exception:
                     feat = QgsFeature()
-                    feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
-                    out_layer.dataProvider().addFeatures([feat])
-                except Exception:
-                    feat = QgsFeature()
-                    feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
+                    feat.setAttributes([
+                        _TYPE_RASTER, lyr.name(), class_label, area_m2, area_m2 / 10000.0, percent
+                    ])
                     out_layer.dataProvider().addFeatures([feat])
 
         if out_layer:
