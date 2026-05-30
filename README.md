@@ -60,7 +60,7 @@ Após a instalação das bibliotecas por qualquer uma das opções, reinicie o Q
 ## Instalação do Plugin
 
 1. No QGIS, acesse: **Plugins > Gerenciar e Instalar Plugins > Instalar a partir de arquivo ZIP**.
-2. Selecione o arquivo `GeoInterseQ_vX.X.X.zip` gerado.
+2. Selecione o arquivo `geointerseq_v1.1.8.zip` gerado.
 
 ---
 
