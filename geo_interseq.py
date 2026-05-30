@@ -15,10 +15,10 @@ from qgis.PyQt.QtWidgets import (
     QAction, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QCheckBox, QComboBox, QListWidget, QListWidgetItem, QTableWidget,
     QTableWidgetItem, QMessageBox, QFrame, QInputDialog, QFileDialog,
-    QDoubleSpinBox
+    QDoubleSpinBox, QWidget, QTextBrowser
 )
 from qgis.PyQt.QtCore import Qt, QVariant, pyqtSignal, QMimeData
-from qgis.PyQt.QtGui import QIcon, QColor, QBrush, QFont
+from qgis.PyQt.QtGui import QIcon, QColor, QBrush, QFont, QPixmap
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsRasterLayer, QgsFeature, QgsGeometry,
     QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsWkbTypes,
@@ -28,6 +28,12 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapLayerComboBox
 from qgis.core import QgsMapLayerProxyModel
+
+try:
+    from qgis.PyQt.QtSvg import QSvgWidget
+    HAS_SVG_WIDGET: bool = True
+except ImportError:
+    HAS_SVG_WIDGET: bool = False
 
 gdal.UseExceptions()
 
@@ -58,7 +64,7 @@ def _build_footer(plugin_dir: str) -> str:
         parts: list[str] = [f'{name} v{version}' if version else name]
         if author:
             parts.append(author)
-        if maintainer:
+        if maintainer and maintainer != author:
             parts.append(maintainer)
         return '  |  '.join(parts)
     except Exception:
@@ -213,7 +219,15 @@ class GeoInterseQDialog(QDialog):
         super().__init__(iface.mainWindow())
         self.iface: object = iface
         self.setWindowTitle('GeoInterseQ — Área e % da Analisada dentro da Base')
-        self.resize(920, 580)
+        self.resize(1180, 620)
+
+        # Layout horizontal principal (divide controles de ajuda)
+        main_layout: QHBoxLayout = QHBoxLayout(self)
+
+        # Painel Esquerdo (Formulário de Controles)
+        left_widget: QWidget = QWidget()
+        left_layout: QVBoxLayout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
 
         self.base_combo: _DropLayerComboBox = _DropLayerComboBox()
         self.base_combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
@@ -233,6 +247,7 @@ class GeoInterseQDialog(QDialog):
 
         self.unit_combo: QComboBox = QComboBox()
         self.unit_combo.addItems(['m²', 'hectares', 'km²'])
+        self.unit_combo.setCurrentText('hectares')
 
         self.chk_create_layer: QCheckBox = QCheckBox('Gerar camada de interseção (temporária)')
 
@@ -276,16 +291,15 @@ class GeoInterseQDialog(QDialog):
         self.btn_export_csv.setEnabled(False)
         self.btn_close: QPushButton = QPushButton('Fechar')
 
-        top: QVBoxLayout = QVBoxLayout(self)
-        top.addWidget(QLabel('<b>Camada base (polígonos vetoriais):</b>'))
-        top.addWidget(self.base_combo)
-        top.addWidget(self.chk_base_selected)
+        left_layout.addWidget(QLabel('<b>Camada base (polígonos vetoriais):</b>'))
+        left_layout.addWidget(self.base_combo)
+        left_layout.addWidget(self.chk_base_selected)
 
-        top.addWidget(QLabel('<b>Camadas analisadas (vetorial ou raster):</b>'))
+        left_layout.addWidget(QLabel('<b>Camadas analisadas (vetorial ou raster):</b>'))
         hl: QHBoxLayout = QHBoxLayout()
         hl.addWidget(self.overlay_combo)
         hl.addWidget(self.btn_add_overlay)
-        top.addLayout(hl)
+        left_layout.addLayout(hl)
 
         hl2: QHBoxLayout = QHBoxLayout()
         hl2.addWidget(self.overlay_list)
@@ -293,40 +307,117 @@ class GeoInterseQDialog(QDialog):
         v_btns.addWidget(self.btn_remove_overlay)
         v_btns.addStretch(1)
         hl2.addLayout(v_btns)
-        top.addLayout(hl2)
+        left_layout.addLayout(hl2)
 
         hl3: QHBoxLayout = QHBoxLayout()
         hl3.addWidget(QLabel('Unidade de área:'))
         hl3.addWidget(self.unit_combo)
         hl3.addStretch(1)
         hl3.addWidget(self.chk_create_layer)
-        top.addLayout(hl3)
+        left_layout.addLayout(hl3)
 
         hl4: QHBoxLayout = QHBoxLayout()
         hl4.addWidget(self.chk_spatial_filter)
         hl4.addWidget(self.spn_buffer_km)
         hl4.addStretch(1)
-        top.addLayout(hl4)
+        left_layout.addLayout(hl4)
 
-        top.addWidget(QLabel('<b>Resultados:</b>'))
-        top.addWidget(self.table, stretch=1)
+        left_layout.addWidget(QLabel('<b>Resultados:</b>'))
+        left_layout.addWidget(self.table, stretch=1)
 
         hb: QHBoxLayout = QHBoxLayout()
         hb.addWidget(self.btn_export_csv)
         hb.addStretch(1)
         hb.addWidget(self.btn_close)
         hb.addWidget(self.btn_run)
-        top.addLayout(hb)
+        left_layout.addLayout(hb)
 
         sep: QFrame = QFrame()
         sep.setFrameShape(QFrame.HLine)
         sep.setFrameShadow(QFrame.Sunken)
-        top.addWidget(sep)
+        left_layout.addWidget(sep)
 
         lbl_footer: QLabel = QLabel(_build_footer(str(Path(__file__).parent)))
         lbl_footer.setAlignment(Qt.AlignCenter)
         lbl_footer.setStyleSheet('color: gray; font-size: 10px;')
-        top.addWidget(lbl_footer)
+        left_layout.addWidget(lbl_footer)
+
+        # Divisor Visual Vertical
+        divider: QFrame = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFrameShadow(QFrame.Sunken)
+
+        # Painel Direito (Logotipo e Tutorial)
+        right_widget: QWidget = QWidget()
+        right_layout: QVBoxLayout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(10, 0, 10, 0)
+        right_widget.setFixedWidth(280)
+
+        # Logotipo da Plataforma
+        logo_path = Path(__file__).parent / 'Logo-GEO-HQ.svg'
+        if logo_path.exists() and HAS_SVG_WIDGET:
+            logo_widget = QSvgWidget(str(logo_path))
+            logo_widget.setFixedSize(140, 178)
+            logo_container = QHBoxLayout()
+            logo_container.addStretch(1)
+            logo_container.addWidget(logo_widget)
+            logo_container.addStretch(1)
+            right_layout.addLayout(logo_container)
+        else:
+            icon_path = Path(__file__).parent / 'icon.png'
+            if icon_path.exists():
+                lbl_logo = QLabel()
+                pix = QPixmap(str(icon_path)).scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                lbl_logo.setPixmap(pix)
+                lbl_logo.setAlignment(Qt.AlignCenter)
+                right_layout.addWidget(lbl_logo)
+
+        # Navegador de Documentação/Tutorial em HTML
+        tutorial_browser: QTextBrowser = QTextBrowser()
+        tutorial_browser.setReadOnly(True)
+        tutorial_browser.setOpenExternalLinks(True)
+        tutorial_browser.setStyleSheet(
+            "QTextBrowser {"
+            " border: 1px solid #c0c0c0;"
+            " border-radius: 4px;"
+            " padding: 6px;"
+            " font-size: 11px;"
+            "}"
+        )
+        
+        tutorial_html: str = """
+        <h3>GeoInterseQ — Tutorial</h3>
+        <p>Calcula interseções de áreas e proporções de sobreposição entre uma camada base e camadas analisadas.</p>
+        
+        <b>Passo a Passo:</b>
+        <ol style="margin-left: -20px; padding-left: 20px;">
+          <li><b>Camada Base:</b> Selecione um vetor de polígonos. Marque para usar apenas feições selecionadas se aplicável.</li>
+          <li><b>Camada Analisada:</b> Escolha um vetor ou raster e clique em <i>Adicionar</i>. Camadas podem ser arrastadas diretamente da barra lateral do QGIS.</li>
+          <li><b>Unidade:</b> Escolha m², hectares (padrão) ou km².</li>
+          <li><b>Filtro Espacial:</b> Ative para polígonos grandes e pesados. Cria um buffer indexado ao redor da base, acelerando o processamento.</li>
+          <li><b>Calcular:</b> Clique para processar e ver os resultados.</li>
+        </ol>
+        
+        <hr/>
+        <b>Dicas Úteis:</b>
+        <ul>
+          <li><b>Modos de % (Vetor):</b>
+            <ul>
+              <li><i>% da feição:</i> proporção da área analisada que incide dentro da base.</li>
+              <li><i>% da base:</i> proporção da camada base que é ocupada pela feição.</li>
+            </ul>
+          </li>
+          <li><b>Modo Raster:</b> Calcula a área pixel a pixel por classe. Mapeia automaticamente a legenda e cores configuradas no QGIS.</li>
+          <li><b>Gerar Camada:</b> Vetores e classes do raster intersectados serão exportados como camadas temporárias no mapa.</li>
+        </ul>
+        """
+        tutorial_browser.setHtml(tutorial_html)
+        right_layout.addWidget(tutorial_browser)
+
+        # Montagem dos painéis no layout horizontal principal
+        main_layout.addWidget(left_widget, stretch=1)
+        main_layout.addWidget(divider)
+        main_layout.addWidget(right_widget, stretch=0)
 
         self.btn_add_overlay.clicked.connect(self.add_overlay)
         self.btn_remove_overlay.clicked.connect(self.remove_overlay)
