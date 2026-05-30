@@ -1,10 +1,11 @@
 # GeoInterseQ
 
 <p align="center">
-  <img src="Logo-GEO-HQ.svg" alt="Logotipo Plataforma Geo e Inovação" width="250">
+  <img src="icon.png" alt="Ícone GeoInterseQ" width="70" style="vertical-align: middle; margin-right: 20px;">
+  <img src="Logo-GEO-HQ.svg" alt="Logotipo Plataforma Geo e Inovação" width="220" style="vertical-align: middle;">
 </p>
 
-**Versão 1.1.8** | **Autores:** Plat. Geo e Inovação
+**Versão 1.2.0** | **Autores:** Plat. Geo e Inovação
 
 ---
 
@@ -60,7 +61,7 @@ Após a instalação das bibliotecas por qualquer uma das opções, reinicie o Q
 ## Instalação do Plugin
 
 1. No QGIS, acesse: **Plugins > Gerenciar e Instalar Plugins > Instalar a partir de arquivo ZIP**.
-2. Selecione o arquivo `geointerseq_v1.1.8.zip` gerado.
+2. Selecione o arquivo `geointerseq_v1.2.0.zip` gerado.
 
 ---
 
