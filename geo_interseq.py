@@ -1026,8 +1026,15 @@ class GeoInterseQDialog(QDialog):
                 factor: float = QgsUnitTypes.fromUnitToUnitFactor(linear_unit, QgsUnitTypes.DistanceMeters)
                 area_pixel_m2 = abs(gt[1]) * abs(gt[5]) * (factor ** 2)
 
+        # Importação das ferramentas espaciais da Shapely e rasterio
+        from shapely.ops import unary_union as _sh_union_out
+        from shapely.geometry import shape as _sh_shape
+        from shapely.validation import make_valid as _sh_make_valid
+        from shapely.ops import transform as _sh_tr_out
+        from rasterio.features import shapes as rio_shapes
+
+        # Obter área de referência da base e transformador UTM para medição métrica precisa
         try:
-            from shapely.ops import transform as _stransform
             _cx_poly: float = shapely_geom.centroid.x
             _cy_poly: float = shapely_geom.centroid.y
             _zone_poly: int = int((_cx_poly + 180) / 6) + 1
@@ -1035,18 +1042,64 @@ class GeoInterseQDialog(QDialog):
             _tr_poly = ProjTransformer.from_crs(
                 f'EPSG:{raster_crs.authid().split(":")[-1]}', f'EPSG:{_utm_epsg_poly}', always_xy=True
             )
-            _base_utm = _stransform(_tr_poly.transform, shapely_geom)
+            _base_utm = _sh_tr_out(_tr_poly.transform, shapely_geom)
             base_area_m2_ref: float = _base_utm.area
         except Exception:
             base_area_m2_ref = base_area_m2
+            _tr_poly = None
+
+        # Preparar transformador para reprojetar para EPSG:4326 (se necessário)
+        _dst_epsg: str = crs_measure.authid().split(':')[-1]
+        _src_epsg_raster: str = raster_crs.authid().split(':')[-1]
+        try:
+            _tr_to_4326 = ProjTransformer.from_crs(
+                f'EPSG:{_src_epsg_raster}', f'EPSG:{_dst_epsg}', always_xy=True
+            ) if _src_epsg_raster != _dst_epsg else None
+        except Exception:
+            _tr_to_4326 = None
 
         unique_vals: np.ndarray = np.unique(pixel_array[frac > 0])
 
         areas_por_classe_m2: dict[int, float] = {}
+        geometrias_por_classe: dict[int, object] = {}
+
         for val in unique_vals:
             class_val: int = int(val)
-            areas_por_classe_m2[class_val] = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
+            class_mask: np.ndarray = (touched_array & (pixel_array == class_val)).astype(np.uint8)
+            
+            # Vetoriza a máscara de pixels da classe atual
+            try:
+                polys = [
+                    _sh_shape(geom)
+                    for geom, v in rio_shapes(class_mask, mask=class_mask, transform=window_affine)
+                    if v == 1
+                ]
+                if polys:
+                    merged = _sh_union_out(polys)
+                    # Realiza o recorte vetorial (intersection/clip) exato pela geometria do imóvel (base)
+                    merged_intersect = merged.intersection(shapely_geom)
+                    merged_intersect = _sh_make_valid(merged_intersect)
+                    
+                    if not merged_intersect.is_empty:
+                        # Calcula a área métrica planar exata (UTM) da geometria recortada resultante
+                        if _tr_poly is not None:
+                            try:
+                                merged_utm = _sh_tr_out(_tr_poly.transform, merged_intersect)
+                                class_area_m2 = merged_utm.area
+                            except Exception:
+                                class_area_m2 = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
+                        else:
+                            class_area_m2 = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
+                        
+                        areas_por_classe_m2[class_val] = class_area_m2
+                        geometrias_por_classe[class_val] = merged_intersect
+            except Exception:
+                # Em caso de qualquer erro na interseção, mantém o cálculo estatístico por fração como fallback
+                class_area_m2 = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
+                if class_area_m2 > 0:
+                    areas_por_classe_m2[class_val] = class_area_m2
 
+        # Ajuste para evitar que aproximações numéricas na discretização excedam a área de referência do imóvel
         area_classes_total_m2: float = sum(areas_por_classe_m2.values())
         if area_classes_total_m2 > base_area_m2_ref * 1.0001:
             fator: float = base_area_m2_ref / area_classes_total_m2
@@ -1094,19 +1147,6 @@ class GeoInterseQDialog(QDialog):
             except Exception:
                 pass
 
-        if out_layer:
-            from rasterio.features import shapes as rio_shapes
-            from shapely.ops import unary_union as _sh_union_out
-            from shapely.geometry import shape as _sh_shape
-            _dst_epsg: str = crs_measure.authid().split(':')[-1]
-            _src_epsg_raster: str = raster_crs.authid().split(':')[-1]
-            try:
-                _tr_to_4326 = ProjTransformer.from_crs(
-                    f'EPSG:{_src_epsg_raster}', f'EPSG:{_dst_epsg}', always_xy=True
-                ) if _src_epsg_raster != _dst_epsg else None
-            except Exception:
-                _tr_to_4326 = None
-
         for class_val, area_m2 in areas_por_classe_m2.items():
             if class_names and class_val in class_names:
                 class_label: str = f"{class_val} – {class_names[class_val]}"
@@ -1117,23 +1157,18 @@ class GeoInterseQDialog(QDialog):
 
             self._insert_result_row_with_class(_TYPE_RASTER, lyr.name(), class_label, area_m2, percent)
 
-            if out_layer:
-                class_mask: np.ndarray = (touched_array & (pixel_array == class_val)).astype(np.uint8)
+            if out_layer and class_val in geometrias_por_classe:
+                geom_intersect = geometrias_por_classe[class_val]
                 try:
-                    polys: list = [
-                        _sh_shape(geom)
-                        for geom, val in rio_shapes(class_mask, mask=class_mask, transform=window_affine)
-                        if val == 1
-                    ]
-                    if polys:
-                        merged = _sh_union_out(polys)
-                        if _tr_to_4326 is not None:
-                            from shapely.ops import transform as _sh_tr_out
-                            merged = _sh_tr_out(_tr_to_4326.transform, merged)
-                        feat = QgsFeature()
-                        feat.setGeometry(QgsGeometry.fromWkt(merged.wkt))
-                        feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
-                        out_layer.dataProvider().addFeatures([feat])
+                    if _tr_to_4326 is not None:
+                        geom_4326 = _sh_tr_out(_tr_to_4326.transform, geom_intersect)
+                    else:
+                        geom_4326 = geom_intersect
+                    
+                    feat = QgsFeature()
+                    feat.setGeometry(QgsGeometry.fromWkt(geom_4326.wkt))
+                    feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
+                    out_layer.dataProvider().addFeatures([feat])
                 except Exception:
                     feat = QgsFeature()
                     feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
