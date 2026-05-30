@@ -1033,22 +1033,14 @@ class GeoInterseQDialog(QDialog):
         from shapely.ops import transform as _sh_tr_out
         from rasterio.features import shapes as rio_shapes
 
-        # Obter área de referência da base e transformador UTM para medição métrica precisa
-        try:
-            _cx_poly: float = shapely_geom.centroid.x
-            _cy_poly: float = shapely_geom.centroid.y
-            _zone_poly: int = int((_cx_poly + 180) / 6) + 1
-            _utm_epsg_poly: int = (32600 + _zone_poly) if _cy_poly >= 0 else (32700 + _zone_poly)
-            _tr_poly = ProjTransformer.from_crs(
-                f'EPSG:{raster_crs.authid().split(":")[-1]}', f'EPSG:{_utm_epsg_poly}', always_xy=True
-            )
-            _base_utm = _sh_tr_out(_tr_poly.transform, shapely_geom)
-            base_area_m2_ref: float = _base_utm.area
-        except Exception:
-            base_area_m2_ref = base_area_m2
-            _tr_poly = None
+        # Inicializa o calculador de área geodésica do QGIS para manter coerência absoluta com o QGIS ($area)
+        da = QgsDistanceArea()
+        ell: str = QgsProject.instance().ellipsoid() or 'WGS84'
+        da.setEllipsoid(ell)
+        da.setSourceCrs(crs_measure, ctx)
+        base_area_m2_ref: float = base_area_m2
 
-        # Preparar transformador para reprojetar para EPSG:4326 (se necessário)
+        # Preparar transformador para reprojetar da projeção do raster para EPSG:4326 (crs_measure)
         _dst_epsg: str = crs_measure.authid().split(':')[-1]
         _src_epsg_raster: str = raster_crs.authid().split(':')[-1]
         try:
@@ -1081,18 +1073,18 @@ class GeoInterseQDialog(QDialog):
                     merged_intersect = _sh_make_valid(merged_intersect)
                     
                     if not merged_intersect.is_empty:
-                        # Calcula a área métrica planar exata (UTM) da geometria recortada resultante
-                        if _tr_poly is not None:
-                            try:
-                                merged_utm = _sh_tr_out(_tr_poly.transform, merged_intersect)
-                                class_area_m2 = merged_utm.area
-                            except Exception:
-                                class_area_m2 = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
+                        # Reprojeta a geometria recortada para o CRS de medição (EPSG:4326)
+                        if _tr_to_4326 is not None:
+                            merged_4326 = _sh_tr_out(_tr_to_4326.transform, merged_intersect)
                         else:
-                            class_area_m2 = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
+                            merged_4326 = merged_intersect
+                        
+                        # Converte para QgsGeometry e calcula a área geodésica elipsoidal oficial
+                        qgs_geom = QgsGeometry.fromWkt(merged_4326.wkt)
+                        class_area_m2 = da.measureArea(qgs_geom) if not qgs_geom.isEmpty() else 0.0
                         
                         areas_por_classe_m2[class_val] = class_area_m2
-                        geometrias_por_classe[class_val] = merged_intersect
+                        geometrias_por_classe[class_val] = merged_4326
             except Exception:
                 # Em caso de qualquer erro na interseção, mantém o cálculo estatístico por fração como fallback
                 class_area_m2 = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
@@ -1158,15 +1150,14 @@ class GeoInterseQDialog(QDialog):
             self._insert_result_row_with_class(_TYPE_RASTER, lyr.name(), class_label, area_m2, percent)
 
             if out_layer and class_val in geometrias_por_classe:
-                geom_intersect = geometrias_por_classe[class_val]
+                geom_4326 = geometrias_por_classe[class_val]
                 try:
-                    if _tr_to_4326 is not None:
-                        geom_4326 = _sh_tr_out(_tr_to_4326.transform, geom_intersect)
-                    else:
-                        geom_4326 = geom_intersect
-                    
                     feat = QgsFeature()
                     feat.setGeometry(QgsGeometry.fromWkt(geom_4326.wkt))
+                    feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
+                    out_layer.dataProvider().addFeatures([feat])
+                except Exception:
+                    feat = QgsFeature()
                     feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
                     out_layer.dataProvider().addFeatures([feat])
                 except Exception:
