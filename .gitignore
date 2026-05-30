@@ -1,0 +1,15 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and Project workspace config
+.vscode/
+.idea/
+.agents/
+graphify-out/
+*.zip
+
+# OS generated files
+.DS_Store
+Thumbs.db

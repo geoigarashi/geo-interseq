@@ -1,0 +1,1074 @@
+# -*- coding: utf-8 -*-
+"""Módulo principal do plugin GeoInterseQ para QGIS.
+
+Calcula a interseção e a porcentagem de sobreposição de camadas vetoriais e raster
+dentro de uma camada base de polígonos.
+"""
+
+import configparser
+from pathlib import Path
+import csv
+import numpy as np
+from osgeo import gdal
+
+from qgis.PyQt.QtWidgets import (
+    QAction, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QCheckBox, QComboBox, QListWidget, QListWidgetItem, QTableWidget,
+    QTableWidgetItem, QMessageBox, QFrame, QInputDialog, QFileDialog,
+    QDoubleSpinBox
+)
+from qgis.PyQt.QtCore import Qt, QVariant, pyqtSignal, QMimeData
+from qgis.PyQt.QtGui import QIcon, QColor, QBrush, QFont
+from qgis.core import (
+    QgsProject, QgsVectorLayer, QgsRasterLayer, QgsFeature, QgsGeometry,
+    QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsWkbTypes,
+    QgsDistanceArea, QgsField, QgsUnitTypes, QgsPointXY,
+    QgsPalettedRasterRenderer, QgsCategorizedSymbolRenderer,
+    QgsRendererCategory, QgsFillSymbol, QgsFeatureRequest, QgsMapLayer
+)
+from qgis.gui import QgsMapLayerComboBox
+from qgis.core import QgsMapLayerProxyModel
+
+gdal.UseExceptions()
+
+PLUGIN_MENU: str = 'Ferramentas Geo'
+LAYER_NAME_OUT: str = 'Interseções (GeoInterseQ)'
+
+_TYPE_VECTOR: str = 'Vetor'
+_TYPE_RASTER: str = 'Raster'
+
+
+def _build_footer(plugin_dir: str) -> str:
+    """Gera o texto de rodapé com base nos metadados do plugin.
+
+    Args:
+        plugin_dir (str): Caminho do diretório do plugin.
+
+    Returns:
+        str: Texto formatado do rodapé do diálogo.
+    """
+    try:
+        meta = configparser.ConfigParser()
+        meta_path = Path(plugin_dir) / 'metadata.txt'
+        meta.read(meta_path, encoding='utf-8')
+        name: str = meta.get('general', 'name', fallback='GeoInterseQ')
+        version: str = meta.get('general', 'version', fallback='')
+        author: str = meta.get('general', 'author', fallback='')
+        maintainer: str = meta.get('general', 'maintainer', fallback='')
+        parts: list[str] = [f'{name} v{version}' if version else name]
+        if author:
+            parts.append(author)
+        if maintainer:
+            parts.append(maintainer)
+        return '  |  '.join(parts)
+    except Exception:
+        return 'GeoInterseQ'
+
+
+_QGIS_LAYER_MIME: str = 'application/qgis.layertreemodeldata'
+
+
+def _layer_from_mime(mime_data: QMimeData) -> QgsMapLayer | None:
+    """Extrai QgsMapLayer a partir do mime data arrastado do painel de camadas do QGIS.
+
+    Args:
+        mime_data (QMimeData): Dados mime do evento de arrastar e soltar.
+
+    Returns:
+        QgsMapLayer | None: A camada do QGIS correspondente ou None caso falhe.
+    """
+    if not mime_data.hasFormat(_QGIS_LAYER_MIME):
+        return None
+    try:
+        from qgis.PyQt.QtXml import QDomDocument
+        doc = QDomDocument()
+        doc.setContent(mime_data.data(_QGIS_LAYER_MIME))
+        layer_id: str = doc.documentElement().firstChildElement('layer-tree-layer').attribute('id')
+        return QgsProject.instance().mapLayer(layer_id)
+    except Exception:
+        return None
+
+
+def _accept_copy(event: object) -> None:
+    """Aceita o evento forçando CopyAction para não remover a camada do projeto.
+
+    Args:
+        event (object): Evento de drag/drop da PyQt.
+    """
+    event.setDropAction(Qt.CopyAction)
+    event.accept()
+
+
+class _DropLayerComboBox(QgsMapLayerComboBox):
+    """QgsMapLayerComboBox com suporte a drag & drop do painel de camadas do QGIS."""
+
+    def __init__(self, parent: object = None) -> None:
+        """Inicializa o combo box configurado para aceitar drop.
+
+        Args:
+            parent (object, optional): Objeto pai do widget.
+        """
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event: object) -> None:
+        """Manipula o evento de entrada do objeto arrastado.
+
+        Args:
+            event (object): Evento de drag enter da PyQt.
+        """
+        if event.mimeData().hasFormat(_QGIS_LAYER_MIME):
+            _accept_copy(event)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: object) -> None:
+        """Manipula o evento de movimentação do objeto arrastado.
+
+        Args:
+            event (object): Evento de drag move da PyQt.
+        """
+        if event.mimeData().hasFormat(_QGIS_LAYER_MIME):
+            _accept_copy(event)
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: object) -> None:
+        """Manipula o evento de soltura do objeto arrastado.
+
+        Args:
+            event (object): Evento de drop da PyQt.
+        """
+        lyr: QgsMapLayer | None = _layer_from_mime(event.mimeData())
+        if lyr:
+            self.setLayer(lyr)
+            _accept_copy(event)
+        else:
+            event.ignore()
+
+
+class _DropOverlayList(QListWidget):
+    """QListWidget que aceita drag & drop do painel de camadas do QGIS.
+
+    Emite o sinal layerDropped(QgsMapLayer) para o diálogo processar.
+    """
+
+    layerDropped: pyqtSignal = pyqtSignal(object)
+
+    def __init__(self, parent: object = None) -> None:
+        """Inicializa a lista configurada para aceitar drops.
+
+        Args:
+            parent (object, optional): Objeto pai do widget.
+        """
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QListWidget.DropOnly)
+
+    def dragEnterEvent(self, event: object) -> None:
+        """Manipula o evento de entrada de arrasto.
+
+        Args:
+            event (object): Evento de drag enter.
+        """
+        if event.mimeData().hasFormat(_QGIS_LAYER_MIME):
+            _accept_copy(event)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: object) -> None:
+        """Manipula o evento de movimentação do arrasto.
+
+        Args:
+            event (object): Evento de drag move.
+        """
+        if event.mimeData().hasFormat(_QGIS_LAYER_MIME):
+            _accept_copy(event)
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: object) -> None:
+        """Manipula o evento de soltura (drop).
+
+        Args:
+            event (object): Evento de drop.
+        """
+        lyr: QgsMapLayer | None = _layer_from_mime(event.mimeData())
+        if lyr:
+            self.layerDropped.emit(lyr)
+            _accept_copy(event)
+        else:
+            event.ignore()
+
+
+class GeoInterseQDialog(QDialog):
+    """Diálogo da interface gráfica para configuração e execução do GeoInterseQ."""
+
+    def __init__(self, iface: object) -> None:
+        """Inicializa o diálogo e monta a interface.
+
+        Args:
+            iface (object): A interface QGIS (QgisInterface).
+        """
+        super().__init__(iface.mainWindow())
+        self.iface: object = iface
+        self.setWindowTitle('GeoInterseQ — Área e % da Analisada dentro da Base')
+        self.resize(920, 580)
+
+        self.base_combo: _DropLayerComboBox = _DropLayerComboBox()
+        self.base_combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+        self.base_combo.setToolTip('Selecione pelo combo ou arraste uma camada do painel de Camadas')
+        self.chk_base_selected: QCheckBox = QCheckBox('Usar apenas feições selecionadas da base')
+
+        self.overlay_combo: _DropLayerComboBox = _DropLayerComboBox()
+        self.overlay_combo.setFilters(
+            QgsMapLayerProxyModel.PolygonLayer | QgsMapLayerProxyModel.RasterLayer
+        )
+        self.btn_add_overlay: QPushButton = QPushButton('Adicionar camada analisada')
+        self.overlay_list: _DropOverlayList = _DropOverlayList()
+        self.overlay_list.setSelectionMode(self.overlay_list.ExtendedSelection)
+        self.overlay_list.setFixedHeight(100)
+        self.overlay_list.setToolTip('Arraste camadas do painel de Camadas ou use o botão "Adicionar"')
+        self.btn_remove_overlay: QPushButton = QPushButton('Remover selecionadas')
+
+        self.unit_combo: QComboBox = QComboBox()
+        self.unit_combo.addItems(['m²', 'hectares', 'km²'])
+
+        self.chk_create_layer: QCheckBox = QCheckBox('Gerar camada de interseção (temporária)')
+
+        self.chk_spatial_filter: QCheckBox = QCheckBox('Filtro espacial vetorial — buffer ao redor da base:')
+        self.chk_spatial_filter.setToolTip(
+            'Limita a análise vetorial às feições dentro de um buffer ao redor da camada base.\n'
+            'Recomendado para camadas grandes (ex: embargos, biomas nacionais).\n'
+            'Usa o índice espacial da camada — muito mais rápido que varrer todas as feições.'
+        )
+        self.spn_buffer_km: QDoubleSpinBox = QDoubleSpinBox()
+        self.spn_buffer_km.setRange(0.1, 500.0)
+        self.spn_buffer_km.setValue(10.0)
+        self.spn_buffer_km.setSuffix(' km')
+        self.spn_buffer_km.setDecimals(1)
+        self.spn_buffer_km.setEnabled(False)
+        self.spn_buffer_km.setFixedWidth(90)
+        self.chk_spatial_filter.toggled.connect(self.spn_buffer_km.setEnabled)
+
+        self.table: QTableWidget = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ['Tipo', 'Camada analisada', 'Classe', 'Área de interseção', '%']
+        )
+        hdr = self.table.horizontalHeader()
+        hdr.setStretchLastSection(True)
+        hdr.setToolTip(
+            'Vetor: % da feição analisada dentro da base\n'
+            'Raster: % da base coberto pela classe'
+        )
+        self.table.setColumnWidth(0, 55)
+        self.table.setColumnWidth(2, 180)
+        self.table.setAlternatingRowColors(True)
+
+        self.btn_run: QPushButton = QPushButton('Calcular')
+        self.btn_run.setStyleSheet(
+            'QPushButton { background-color: #0078d4; color: white; font-weight: bold;'
+            ' border-radius: 4px; padding: 4px 16px; }'
+            'QPushButton:hover { background-color: #006abe; }'
+            'QPushButton:pressed { background-color: #005a9e; }'
+        )
+        self.btn_export_csv: QPushButton = QPushButton('Exportar CSV')
+        self.btn_export_csv.setEnabled(False)
+        self.btn_close: QPushButton = QPushButton('Fechar')
+
+        top: QVBoxLayout = QVBoxLayout(self)
+        top.addWidget(QLabel('<b>Camada base (polígonos vetoriais):</b>'))
+        top.addWidget(self.base_combo)
+        top.addWidget(self.chk_base_selected)
+
+        top.addWidget(QLabel('<b>Camadas analisadas (vetorial ou raster):</b>'))
+        hl: QHBoxLayout = QHBoxLayout()
+        hl.addWidget(self.overlay_combo)
+        hl.addWidget(self.btn_add_overlay)
+        top.addLayout(hl)
+
+        hl2: QHBoxLayout = QHBoxLayout()
+        hl2.addWidget(self.overlay_list)
+        v_btns: QVBoxLayout = QVBoxLayout()
+        v_btns.addWidget(self.btn_remove_overlay)
+        v_btns.addStretch(1)
+        hl2.addLayout(v_btns)
+        top.addLayout(hl2)
+
+        hl3: QHBoxLayout = QHBoxLayout()
+        hl3.addWidget(QLabel('Unidade de área:'))
+        hl3.addWidget(self.unit_combo)
+        hl3.addStretch(1)
+        hl3.addWidget(self.chk_create_layer)
+        top.addLayout(hl3)
+
+        hl4: QHBoxLayout = QHBoxLayout()
+        hl4.addWidget(self.chk_spatial_filter)
+        hl4.addWidget(self.spn_buffer_km)
+        hl4.addStretch(1)
+        top.addLayout(hl4)
+
+        top.addWidget(QLabel('<b>Resultados:</b>'))
+        top.addWidget(self.table, stretch=1)
+
+        hb: QHBoxLayout = QHBoxLayout()
+        hb.addWidget(self.btn_export_csv)
+        hb.addStretch(1)
+        hb.addWidget(self.btn_close)
+        hb.addWidget(self.btn_run)
+        top.addLayout(hb)
+
+        sep: QFrame = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        top.addWidget(sep)
+
+        lbl_footer: QLabel = QLabel(_build_footer(str(Path(__file__).parent)))
+        lbl_footer.setAlignment(Qt.AlignCenter)
+        lbl_footer.setStyleSheet('color: gray; font-size: 10px;')
+        top.addWidget(lbl_footer)
+
+        self.btn_add_overlay.clicked.connect(self.add_overlay)
+        self.btn_remove_overlay.clicked.connect(self.remove_overlay)
+        self.overlay_list.layerDropped.connect(self.add_overlay)
+        self.btn_run.clicked.connect(self.run)
+        self.btn_export_csv.clicked.connect(self.export_csv)
+        self.btn_close.clicked.connect(self.hide)
+
+    def add_overlay(self, lyr: QgsMapLayer | None = None) -> None:
+        """Adiciona uma camada na lista de sobreposições para análise.
+
+        Args:
+            lyr (QgsMapLayer | None, optional): A camada de mapa a ser adicionada.
+        """
+        if not isinstance(lyr, (QgsVectorLayer, QgsRasterLayer)):
+            lyr = self.overlay_combo.currentLayer()
+        if not isinstance(lyr, (QgsVectorLayer, QgsRasterLayer)):
+            return
+        for i in range(self.overlay_list.count()):
+            if self.overlay_list.item(i).data(Qt.UserRole) == lyr:
+                return
+
+        label_field: str | None = None
+        pct_relative_to_base: bool = False
+        if isinstance(lyr, QgsVectorLayer):
+            fields: list[str] = [f.name() for f in lyr.fields()]
+            if fields:
+                field, ok = QInputDialog.getItem(
+                    self,
+                    'Campo de rótulo',
+                    f'Selecione o campo para identificar cada feição de "{lyr.name()}":',
+                    fields,
+                    0,
+                    False,
+                )
+                if not ok:
+                    return
+                label_field = field
+
+            pct_options: list[str] = [
+                '% da feição analisada  (ex: quanto da gleba está dentro do imóvel)',
+                '% da camada base       (ex: quanto do imóvel está coberto pela feição)',
+            ]
+            pct_choice, ok = QInputDialog.getItem(
+                self,
+                'Base do percentual',
+                'O % deve ser calculado em relação a qual área?',
+                pct_options,
+                0,
+                False,
+            )
+            if not ok:
+                return
+            pct_relative_to_base = pct_choice == pct_options[1]
+
+        prefix: str = _TYPE_RASTER if isinstance(lyr, QgsRasterLayer) else _TYPE_VECTOR
+        label_info: str = f' [{label_field}]' if label_field else ''
+        item: QListWidgetItem = QListWidgetItem(f'[{prefix}] {lyr.name()}{label_info}')
+        item.setData(Qt.UserRole, lyr)
+        item.setData(Qt.UserRole + 1, label_field)
+        item.setData(Qt.UserRole + 2, pct_relative_to_base)
+        tip_pct: str = '% da camada base' if pct_relative_to_base else '% da feição analisada'
+        item.setToolTip(
+            'Análise pixel a pixel por classe (raster categórico inteiro)'
+            if prefix == _TYPE_RASTER
+            else f'Campo de rótulo: {label_field} | {tip_pct}'
+        )
+        self.overlay_list.addItem(item)
+
+    def remove_overlay(self) -> None:
+        """Remove as camadas selecionadas da lista de sobreposições."""
+        for it in self.overlay_list.selectedItems():
+            self.overlay_list.takeItem(self.overlay_list.row(it))
+
+    def _convert_area(self, area_m2: float) -> float:
+        """Converte a área de metros quadrados para a unidade selecionada.
+
+        Args:
+            area_m2 (float): Área em metros quadrados.
+
+        Returns:
+            float: Área convertida na unidade selecionada.
+        """
+        u: str = self.unit_combo.currentText()
+        if u == 'hectares':
+            return area_m2 / 10000.0
+        if u == 'km²':
+            return area_m2 / 1_000_000.0
+        return area_m2
+
+    def _format_area(self, area_m2: float) -> str:
+        """Formata o valor da área para exibição textual em padrão brasileiro.
+
+        Args:
+            area_m2 (float): Área em metros quadrados.
+
+        Returns:
+            str: Texto formatado (ex: "1.234,5678 hectares").
+        """
+        val: float = self._convert_area(area_m2)
+        unit: str = self.unit_combo.currentText()
+        return f"{val:,.4f} {unit}".replace(',', 'X').replace('.', ',').replace('X', '.')
+
+    def _insert_result_row(self, layer_type: str, name: str, area_m2: float, percent: float) -> None:
+        """Atalho para inserir linha sem especificação de classe.
+
+        Args:
+            layer_type (str): Tipo da camada (Vetor/Raster).
+            name (str): Nome da camada.
+            area_m2 (float): Área de interseção em m².
+            percent (float): Percentual da interseção.
+        """
+        self._insert_result_row_with_class(layer_type, name, '—', area_m2, percent)
+
+    def _insert_result_row_with_class(
+        self, layer_type: str, name: str, class_label: str, area_m2: float, percent: float
+    ) -> None:
+        """Insere uma linha de resultado detalhada na tabela.
+
+        Args:
+            layer_type (str): Tipo da camada (Vetor/Raster).
+            name (str): Nome da camada analisada.
+            class_label (str): Classe ou rótulo da feição.
+            area_m2 (float): Área de interseção em m².
+            percent (float): Percentual da interseção.
+        """
+        row: int = self.table.rowCount()
+        self.table.insertRow(row)
+        pct_text: str = f"{percent:.2f} %" if area_m2 > 0 else '0,00 %'
+        for col, text in enumerate([layer_type, name, class_label, self._format_area(area_m2), pct_text]):
+            item: QTableWidgetItem = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row, col, item)
+
+        type_item: QTableWidgetItem = self.table.item(row, 0)
+        if layer_type == _TYPE_VECTOR:
+            type_item.setBackground(QBrush(QColor('#dbeafe')))
+            type_item.setForeground(QBrush(QColor('#1e40af')))
+        else:
+            type_item.setBackground(QBrush(QColor('#fef3c7')))
+            type_item.setForeground(QBrush(QColor('#92400e')))
+        bold: QFont = QFont()
+        bold.setBold(True)
+        type_item.setFont(bold)
+        type_item.setTextAlignment(Qt.AlignCenter)
+
+    def run(self) -> None:
+        """Executa a análise de interseção espacial espacial baseada nas configurações da GUI."""
+        base: QgsMapLayer | None = self.base_combo.currentLayer()
+        if not isinstance(base, QgsVectorLayer) or base.geometryType() != QgsWkbTypes.PolygonGeometry:
+            QMessageBox.warning(self, 'Aviso', 'Selecione uma camada BASE de POLÍGONOS.')
+            return
+        if self.overlay_list.count() == 0:
+            QMessageBox.warning(self, 'Aviso', 'Adicione pelo menos uma camada analisada.')
+            return
+
+        base_feats: list[QgsFeature] = (
+            list(base.getSelectedFeatures()) if self.chk_base_selected.isChecked()
+            else list(base.getFeatures())
+        )
+        if not base_feats:
+            QMessageBox.warning(self, 'Aviso', 'A camada base não possui feições (ou nenhuma está selecionada).')
+            return
+
+        crs_measure: QgsCoordinateReferenceSystem = QgsCoordinateReferenceSystem('EPSG:4326')
+        ctx: object = QgsProject.instance().transformContext()
+
+        base_geoms: list[QgsGeometry] = []
+        for f in base_feats:
+            g: QgsGeometry = f.geometry()
+            if not g or g.isEmpty():
+                continue
+            g2: QgsGeometry = QgsGeometry(g)
+            if base.crs() != crs_measure:
+                try:
+                    tr = QgsCoordinateTransform(base.crs(), crs_measure, ctx)
+                    g2.transform(tr)
+                except Exception as e:
+                    QMessageBox.critical(self, 'Erro de transformação', f'Falha ao reprojetar base: {e}')
+                    return
+            base_geoms.append(g2)
+
+        if not base_geoms:
+            QMessageBox.critical(self, 'Erro', 'Geometrias inválidas na base.')
+            return
+
+        base_union: QgsGeometry = base_geoms[0]
+        for g in base_geoms[1:]:
+            base_union = base_union.combine(g)
+        base_union = base_union.makeValid()
+
+        da: QgsDistanceArea = QgsDistanceArea()
+        ell: str = QgsProject.instance().ellipsoid() or 'WGS84'
+        da.setEllipsoid(ell)
+        da.setSourceCrs(crs_measure, ctx)
+
+        base_area_m2: float = da.measureArea(base_union)
+
+        base_source_wkt_list: list[str] = []
+        for f in base_feats:
+            g = f.geometry()
+            if g and not g.isEmpty():
+                base_source_wkt_list.append(g.asWkt())
+        base_source_crs: QgsCoordinateReferenceSystem = base.crs()
+
+        self.table.setRowCount(0)
+        self.btn_export_csv.setEnabled(False)
+
+        create_layer: bool = self.chk_create_layer.isChecked()
+
+        def _make_out_layer(name: str) -> QgsVectorLayer:
+            vl = QgsVectorLayer(
+                f"MultiPolygon?crs={crs_measure.authid()}", name, 'memory'
+            )
+            prov = vl.dataProvider()
+            prov.addAttributes([
+                QgsField('type', QVariant.String),
+                QgsField('layer', QVariant.String),
+                QgsField('class', QVariant.String),
+                QgsField('area_m2', QVariant.Double),
+                QgsField('percent', QVariant.Double),
+            ])
+            vl.updateFields()
+            return vl
+
+        vec_out_layer: QgsVectorLayer | None = _make_out_layer(LAYER_NAME_OUT) if create_layer else None
+        vec_out_used: bool = False
+
+        spatial_filter_rect: QgsGeometry | None = None
+        if self.chk_spatial_filter.isChecked():
+            buf_m: float = self.spn_buffer_km.value() * 1000.0
+            bbox = base_union.boundingBox()
+            bbox.grow(buf_m / 111320.0)
+            spatial_filter_rect = bbox
+
+        for i in range(self.overlay_list.count()):
+            lyr: QgsMapLayer | None = self.overlay_list.item(i).data(Qt.UserRole)
+
+            if isinstance(lyr, QgsRasterLayer):
+                raster_out: QgsVectorLayer | None = _make_out_layer(f'Interseção — {lyr.name()}') if create_layer else None
+                self._process_raster_layer(
+                    lyr, base_union, base_area_m2, crs_measure, ctx, raster_out,
+                    base_source_wkt_list, base_source_crs
+                )
+                if raster_out and create_layer:
+                    raster_out.updateExtents()
+                    QgsProject.instance().addMapLayer(raster_out)
+            elif isinstance(lyr, QgsVectorLayer):
+                if lyr.geometryType() != QgsWkbTypes.PolygonGeometry:
+                    continue
+                label_field: str | None = self.overlay_list.item(i).data(Qt.UserRole + 1)
+                pct_relative_to_base: bool = self.overlay_list.item(i).data(Qt.UserRole + 2) or False
+                self._process_vector_layer(
+                    lyr, base_union, base_area_m2, label_field,
+                    pct_relative_to_base, da, crs_measure, ctx, vec_out_layer,
+                    spatial_filter_rect
+                )
+                vec_out_used = True
+
+        if vec_out_layer and vec_out_used:
+            vec_out_layer.updateExtents()
+            QgsProject.instance().addMapLayer(vec_out_layer)
+
+        if self.table.rowCount() > 0:
+            self.btn_export_csv.setEnabled(True)
+
+    def export_csv(self) -> None:
+        """Exporta os resultados exibidos na tabela para um arquivo CSV delimitado por ';', codificação UTF-8-sig."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Exportar resultados como CSV', '', 'CSV (*.csv)'
+        )
+        if not path:
+            return
+        if not path.lower().endswith('.csv'):
+            path += '.csv'
+
+        headers: list[str] = [
+            self.table.horizontalHeaderItem(c).text()
+            for c in range(self.table.columnCount())
+        ]
+        try:
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow(headers)
+                for row in range(self.table.rowCount()):
+                    writer.writerow([
+                        (self.table.item(row, col).text() if self.table.item(row, col) else '')
+                        for col in range(self.table.columnCount())
+                    ])
+            QMessageBox.information(self, 'Exportação concluída', f'Arquivo salvo em:\n{path}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Erro ao exportar', str(e))
+
+    def _process_vector_layer(
+        self, lyr: QgsVectorLayer, base_union: QgsGeometry, base_area_m2: float,
+        label_field: str | None, pct_relative_to_base: bool, da: QgsDistanceArea,
+        crs_measure: QgsCoordinateReferenceSystem, ctx: object,
+        out_layer: QgsVectorLayer | None, spatial_filter_rect: object = None
+    ) -> None:
+        """Processa a interseção com uma camada vetorial de polígonos.
+
+        Args:
+            lyr (QgsVectorLayer): Camada vetorial analisada.
+            base_union (QgsGeometry): Geometria unificada da camada base.
+            base_area_m2 (float): Área total da camada base em m².
+            label_field (str | None): Nome do campo de rótulo para identificação.
+            pct_relative_to_base (bool): Se True, calcula % em relação à base. Senão, em relação à feição.
+            da (QgsDistanceArea): Ferramenta de cálculo de área com elipsoide do QGIS.
+            crs_measure (QgsCoordinateReferenceSystem): CRS para cálculo métrico (WGS84).
+            ctx (object): Contexto de transformação do projeto.
+            out_layer (QgsVectorLayer | None): Camada de saída para guardar geometrias intersectadas.
+            spatial_filter_rect (object, optional): Bounding box opcional para o filtro espacial.
+        """
+        try:
+            tr_ov = QgsCoordinateTransform(lyr.crs(), crs_measure, ctx)
+        except Exception as e:
+            QMessageBox.critical(self, 'Erro de transformação', f'Falha no CRS da camada {lyr.name()}: {e}')
+            return
+
+        if spatial_filter_rect is not None:
+            try:
+                tr_rect = QgsCoordinateTransform(crs_measure, lyr.crs(), ctx)
+                filter_rect = tr_rect.transformBoundingBox(spatial_filter_rect)
+            except Exception:
+                filter_rect = spatial_filter_rect
+            request = QgsFeatureRequest().setFilterRect(filter_rect)
+        else:
+            request = QgsFeatureRequest()
+
+        for feat in lyr.getFeatures(request):
+            g = feat.geometry()
+            if not g or g.isEmpty():
+                continue
+            g2 = QgsGeometry(g)
+            try:
+                g2.transform(tr_ov)
+            except Exception:
+                continue
+            g2 = g2.makeValid()
+
+            feat_area_m2: float = da.measureArea(g2)
+
+            inter_geom = g2.intersection(base_union)
+            inter_geom = inter_geom.makeValid() if inter_geom else None
+            inter_area_m2: float = (
+                da.measureArea(inter_geom) if inter_geom and not inter_geom.isEmpty() else 0.0
+            )
+
+            if inter_area_m2 < 1.0:
+                continue
+
+            if pct_relative_to_base:
+                denom = base_area_m2
+            else:
+                denom = feat_area_m2
+            percent: float = (inter_area_m2 / denom * 100.0) if denom > 0 else 0.0
+
+            if label_field:
+                class_label: str = str(feat[label_field]) if feat[label_field] is not None else f'FID {feat.id()}'
+            else:
+                class_label = f'FID {feat.id()}'
+
+            self._insert_result_row_with_class(_TYPE_VECTOR, lyr.name(), class_label, inter_area_m2, percent)
+
+            if out_layer and inter_geom and not inter_geom.isEmpty():
+                out_feat = QgsFeature()
+                out_feat.setGeometry(inter_geom)
+                out_feat.setAttributes([_TYPE_VECTOR, lyr.name(), class_label, inter_area_m2, percent])
+                out_layer.dataProvider().addFeatures([out_feat])
+
+    def _process_raster_layer(
+        self, lyr: QgsRasterLayer, base_union: QgsGeometry, base_area_m2: float,
+        crs_measure: QgsCoordinateReferenceSystem, ctx: object,
+        out_layer: QgsVectorLayer | None, base_source_wkt_list: list[str] | None = None,
+        base_source_crs: QgsCoordinateReferenceSystem | None = None
+    ) -> None:
+        """Processa a interseção espacial com uma camada raster categórica.
+
+        Args:
+            lyr (QgsRasterLayer): Camada raster de entrada.
+            base_union (QgsGeometry): Geometria unificada da base (WGS84).
+            base_area_m2 (float): Área total da base em m².
+            crs_measure (QgsCoordinateReferenceSystem): CRS métrico de cálculo.
+            ctx (object): Contexto de transformação do projeto.
+            out_layer (QgsVectorLayer | None): Camada de memória de saída.
+            base_source_wkt_list (list[str] | None, optional): Lista de WKT originais da base (nativo).
+            base_source_crs (QgsCoordinateReferenceSystem | None, optional): CRS nativo da base.
+        """
+        raster_path: str = lyr.source().split('|')[0]
+        try:
+            ds = gdal.Open(raster_path, gdal.GA_ReadOnly)
+        except Exception as e:
+            QMessageBox.critical(self, 'Erro', f'Não foi possível abrir o raster: {e}')
+            return
+        if ds is None:
+            QMessageBox.critical(self, 'Erro', f'Não foi possível abrir o raster:\n{raster_path}')
+            return
+
+        band = ds.GetRasterBand(1)
+        nodata = band.GetNoDataValue()
+
+        gt = ds.GetGeoTransform()
+        raster_crs_wkt: str = ds.GetProjection()
+        raster_crs: QgsCoordinateReferenceSystem = QgsCoordinateReferenceSystem()
+        raster_crs.createFromWkt(raster_crs_wkt)
+
+        if gt[2] != 0 or gt[4] != 0:
+            QMessageBox.warning(
+                self, 'Raster rotacionado',
+                f'O raster "{lyr.name()}" possui rotação no GeoTransform e não é suportado.'
+            )
+            ds = None
+            return
+
+        try:
+            tr_to_raster = QgsCoordinateTransform(crs_measure, raster_crs, ctx)
+            base_in_raster_crs = QgsGeometry(base_union)
+            base_in_raster_crs.transform(tr_to_raster)
+            base_in_raster_crs = base_in_raster_crs.makeValid()
+        except Exception as e:
+            QMessageBox.critical(self, 'Erro de reprojeção', str(e))
+            ds = None
+            return
+
+        import rasterio
+        import rasterio.transform
+        import rasterio.windows
+        from rasterio.features import rasterize as rio_rasterize
+        from rasterio.transform import xy as rasterio_xy
+        from shapely import wkt as shapely_wkt
+        from pyproj import Transformer as ProjTransformer
+
+        shapely_geom = None
+        if base_source_wkt_list and base_source_crs is not None:
+            try:
+                from shapely.ops import transform as _sh_transform, unary_union as _sh_union
+                from shapely.validation import make_valid as _sh_make_valid
+
+                src_authid: str = base_source_crs.authid() or ''
+                dst_authid: str = raster_crs.authid() or ''
+                src_epsg: str | None = src_authid.split(':')[-1] if src_authid else None
+                dst_epsg: str | None = dst_authid.split(':')[-1] if dst_authid else None
+
+                geoms_src = [shapely_wkt.loads(w) for w in base_source_wkt_list]
+                geoms_src = [g for g in geoms_src if g is not None and not g.is_empty]
+
+                if src_epsg and dst_epsg and src_epsg != dst_epsg:
+                    _tr_base = ProjTransformer.from_crs(
+                        f'EPSG:{src_epsg}', f'EPSG:{dst_epsg}', always_xy=True
+                    )
+                    geoms_dst = [_sh_transform(_tr_base.transform, g) for g in geoms_src]
+                else:
+                    geoms_dst = geoms_src
+
+                geoms_dst = [_sh_make_valid(g) for g in geoms_dst]
+                if len(geoms_dst) == 1:
+                    shapely_geom = geoms_dst[0]
+                elif len(geoms_dst) > 1:
+                    shapely_geom = _sh_union(geoms_dst)
+            except Exception:
+                shapely_geom = None
+
+        if shapely_geom is None or shapely_geom.is_empty:
+            shapely_geom = shapely_wkt.loads(base_in_raster_crs.asWkt())
+
+        if shapely_geom is None or shapely_geom.is_empty:
+            ds = None
+            return
+
+        _minx, _miny, _maxx, _maxy = shapely_geom.bounds
+        with rasterio.open(raster_path) as _src_rio:
+            _window = rasterio.windows.from_bounds(
+                _minx, _miny, _maxx, _maxy,
+                transform=_src_rio.transform
+            )
+            src_window = _window.crop(height=_src_rio.height, width=_src_rio.width)
+
+            if src_window.width <= 0 or src_window.height <= 0:
+                QMessageBox.information(
+                    self, 'Sem sobreposição',
+                    f'O raster "{lyr.name()}" não cobre a extensão da camada base.'
+                )
+                ds = None
+                return
+
+            est_pixels: int = int(src_window.width) * int(src_window.height)
+            if est_pixels > 50_000_000:
+                resp = QMessageBox.question(
+                    self, 'Tile grande',
+                    f'O recorte do raster tem ~{est_pixels:,} pixels.\n'
+                    'O cálculo pode demorar vários segundos. Continuar?',
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if resp != QMessageBox.Yes:
+                    ds = None
+                    return
+
+            data_masked = _src_rio.read(1, window=src_window, masked=True)
+            window_affine = rasterio.windows.transform(src_window, _src_rio.transform)
+
+        pixel_array: np.ndarray = np.asarray(data_masked.filled(0), dtype=np.int32)
+        tile_h, tile_w = pixel_array.shape
+
+        interior_array: np.ndarray = rio_rasterize(
+            [(shapely_geom, 1)],
+            out_shape=(tile_h, tile_w),
+            transform=window_affine,
+            fill=0,
+            all_touched=False,
+        ).astype(bool)
+
+        touched_array: np.ndarray = rio_rasterize(
+            [(shapely_geom, 1)],
+            out_shape=(tile_h, tile_w),
+            transform=window_affine,
+            fill=0,
+            all_touched=True,
+        ).astype(bool)
+
+        frac: np.ndarray = np.zeros(pixel_array.shape, dtype=np.float32)
+        frac[interior_array] = 1.0
+        frac[touched_array & ~interior_array] = 0.5
+
+        if nodata is not None:
+            nodata_mask = pixel_array == np.array(nodata, dtype=pixel_array.dtype)
+            frac[nodata_mask] = 0.0
+
+        ds = None
+
+        if frac.sum() == 0:
+            QMessageBox.information(
+                self, 'Sem dados',
+                f'O raster "{lyr.name()}" não possui pixels válidos dentro da camada base.'
+            )
+            return
+
+        try:
+            with rasterio.open(raster_path) as _src:
+                _bounds = _src.bounds
+                _cx: float = (_bounds.left + _bounds.right) / 2.0
+                _cy: float = (_bounds.bottom + _bounds.top) / 2.0
+                _zone: int = int((_cx + 180) / 6) + 1
+                _utm_epsg: int = (32600 + _zone) if _cy >= 0 else (32700 + _zone)
+                _tr = ProjTransformer.from_crs(
+                    _src.crs, f'EPSG:{_utm_epsg}', always_xy=True
+                )
+                x1r, y1r = rasterio_xy(_src.transform, 0, 0, offset='ul')
+                x2r, y2r = rasterio_xy(_src.transform, 1, 1, offset='ul')
+                x1u, y1u = _tr.transform(x1r, y1r)
+                x2u, y2u = _tr.transform(x2r, y2r)
+                area_pixel_m2: float = abs(x2u - x1u) * abs(y2u - y1u)
+        except Exception:
+            if raster_crs.isGeographic():
+                _origin_x: float = window_affine.c
+                _origin_y: float = window_affine.f
+                cx: float = _origin_x + (tile_w / 2.0) * gt[1]
+                cy: float = _origin_y + (tile_h / 2.0) * gt[5]
+                zone: int = int((cx + 180) / 6) + 1
+                utm_epsg: int = (32600 + zone) if cy >= 0 else (32700 + zone)
+                utm_crs = QgsCoordinateReferenceSystem(f'EPSG:{utm_epsg}')
+                tr_utm = QgsCoordinateTransform(raster_crs, utm_crs, ctx)
+                p0 = tr_utm.transform(QgsPointXY(cx, cy))
+                p1 = tr_utm.transform(QgsPointXY(cx + gt[1], cy + gt[5]))
+                area_pixel_m2 = abs(p1.x() - p0.x()) * abs(p1.y() - p0.y())
+            else:
+                linear_unit = raster_crs.mapUnits()
+                factor: float = QgsUnitTypes.fromUnitToUnitFactor(linear_unit, QgsUnitTypes.DistanceMeters)
+                area_pixel_m2 = abs(gt[1]) * abs(gt[5]) * (factor ** 2)
+
+        try:
+            from shapely.ops import transform as _stransform
+            _cx_poly: float = shapely_geom.centroid.x
+            _cy_poly: float = shapely_geom.centroid.y
+            _zone_poly: int = int((_cx_poly + 180) / 6) + 1
+            _utm_epsg_poly: int = (32600 + _zone_poly) if _cy_poly >= 0 else (32700 + _zone_poly)
+            _tr_poly = ProjTransformer.from_crs(
+                f'EPSG:{raster_crs.authid().split(":")[-1]}', f'EPSG:{_utm_epsg_poly}', always_xy=True
+            )
+            _base_utm = _stransform(_tr_poly.transform, shapely_geom)
+            base_area_m2_ref: float = _base_utm.area
+        except Exception:
+            base_area_m2_ref = base_area_m2
+
+        unique_vals: np.ndarray = np.unique(pixel_array[frac > 0])
+
+        areas_por_classe_m2: dict[int, float] = {}
+        for val in unique_vals:
+            class_val: int = int(val)
+            areas_por_classe_m2[class_val] = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
+
+        area_classes_total_m2: float = sum(areas_por_classe_m2.values())
+        if area_classes_total_m2 > base_area_m2_ref * 1.0001:
+            fator: float = base_area_m2_ref / area_classes_total_m2
+            areas_por_classe_m2 = {k: v * fator for k, v in areas_por_classe_m2.items()}
+            area_classes_total_m2 = sum(areas_por_classe_m2.values())
+
+        class_names: dict[int, str] = {}
+        try:
+            renderer = lyr.renderer()
+            if isinstance(renderer, QgsPalettedRasterRenderer):
+                for cls in renderer.classes():
+                    label: str = cls.label.strip()
+                    if label and label != str(int(cls.value)):
+                        class_names[int(cls.value)] = label
+        except Exception:
+            pass
+
+        if not class_names:
+            try:
+                band_reopen = gdal.Open(raster_path, gdal.GA_ReadOnly).GetRasterBand(1)
+                rat = band_reopen.GetDefaultRAT()
+                if rat is not None:
+                    n_cols: int = rat.GetColumnCount()
+                    n_rows: int = rat.GetRowCount()
+                    val_col: int = -1
+                    name_col: int = -1
+                    for c in range(n_cols):
+                        usage = rat.GetUsageOfCol(c)
+                        if usage == gdal.GFU_MinMax:
+                            val_col = c
+                        elif usage == gdal.GFU_Name:
+                            name_col = c
+                    if name_col == -1:
+                        for c in range(n_cols):
+                            col_name_lower: str = rat.GetNameOfCol(c).lower()
+                            if 'name' in col_name_lower or 'class' in col_name_lower:
+                                name_col = c
+                                break
+                    if val_col >= 0 and name_col >= 0:
+                        for r in range(n_rows):
+                            try:
+                                class_names[rat.GetValueAsInt(r, val_col)] = rat.GetValueAsString(r, name_col)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+        if out_layer:
+            from rasterio.features import shapes as rio_shapes
+            from shapely.ops import unary_union as _sh_union_out
+            from shapely.geometry import shape as _sh_shape
+            _dst_epsg: str = crs_measure.authid().split(':')[-1]
+            _src_epsg_raster: str = raster_crs.authid().split(':')[-1]
+            try:
+                _tr_to_4326 = ProjTransformer.from_crs(
+                    f'EPSG:{_src_epsg_raster}', f'EPSG:{_dst_epsg}', always_xy=True
+                ) if _src_epsg_raster != _dst_epsg else None
+            except Exception:
+                _tr_to_4326 = None
+
+        for class_val, area_m2 in areas_por_classe_m2.items():
+            if class_names and class_val in class_names:
+                class_label: str = f"{class_val} – {class_names[class_val]}"
+            else:
+                class_label = str(class_val)
+
+            percent: float = (area_m2 / area_classes_total_m2 * 100.0) if area_classes_total_m2 > 0 else 0.0
+
+            self._insert_result_row_with_class(_TYPE_RASTER, lyr.name(), class_label, area_m2, percent)
+
+            if out_layer:
+                class_mask: np.ndarray = (touched_array & (pixel_array == class_val)).astype(np.uint8)
+                try:
+                    polys: list = [
+                        _sh_shape(geom)
+                        for geom, val in rio_shapes(class_mask, mask=class_mask, transform=window_affine)
+                        if val == 1
+                    ]
+                    if polys:
+                        merged = _sh_union_out(polys)
+                        if _tr_to_4326 is not None:
+                            from shapely.ops import transform as _sh_tr_out
+                            merged = _sh_tr_out(_tr_to_4326.transform, merged)
+                        feat = QgsFeature()
+                        feat.setGeometry(QgsGeometry.fromWkt(merged.wkt))
+                        feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
+                        out_layer.dataProvider().addFeatures([feat])
+                except Exception:
+                    feat = QgsFeature()
+                    feat.setAttributes([_TYPE_RASTER, lyr.name(), class_label, area_m2, percent])
+                    out_layer.dataProvider().addFeatures([feat])
+
+        if out_layer:
+            try:
+                renderer = lyr.renderer()
+                if isinstance(renderer, QgsPalettedRasterRenderer):
+                    color_map: dict[int, QColor] = {int(cls.value): cls.color for cls in renderer.classes()}
+                    categories: list[QgsRendererCategory] = []
+                    for class_val, area_m2 in areas_por_classe_m2.items():
+                        if class_names and class_val in class_names:
+                            label: str = f"{class_val} – {class_names[class_val]}"
+                        else:
+                            label = str(class_val)
+                        color: QColor = color_map.get(class_val, QColor(128, 128, 128))
+                        symbol: QgsFillSymbol = QgsFillSymbol.createSimple({
+                            'color': color.name(),
+                            'outline_style': 'no',
+                        })
+                        categories.append(QgsRendererCategory(label, symbol, label))
+                    if categories:
+                        out_layer.setRenderer(
+                            QgsCategorizedSymbolRenderer('class', categories)
+                        )
+            except Exception:
+                pass
+
+
+class GeoInterseQPlugin:
+    """Plugin QGIS para carregar a interface e as ações do GeoInterseQ."""
+
+    def __init__(self, iface: object) -> None:
+        """Inicializa o plugin com a referência da interface do QGIS.
+
+        Args:
+            iface (object): Interface principal do QGIS.
+        """
+        self.iface: object = iface
+        self.action: QAction | None = None
+        self.dialog: GeoInterseQDialog | None = None
+
+    def initGui(self) -> None:
+        """Monta o botão na barra de ferramentas e no menu correspondente do QGIS."""
+        icon_path: Path = Path(__file__).parent / 'icon.png'
+        icon: QIcon = QIcon(str(icon_path)) if icon_path.exists() else QIcon()
+        self.action = QAction(icon, 'GeoInterseQ', self.iface.mainWindow())
+        self.action.setToolTip('GeoInterseQ — área de interseção e % dentro da base')
+        self.action.triggered.connect(self.run)
+        self.iface.addToolBarIcon(self.action)
+        self.iface.addPluginToMenu(PLUGIN_MENU, self.action)
+
+    def unload(self) -> None:
+        """Descarrega os widgets e as ações do plugin ao ser desativado."""
+        if self.action:
+            self.iface.removeToolBarIcon(self.action)
+            self.iface.removePluginMenu(PLUGIN_MENU, self.action)
+        if self.dialog:
+            self.dialog.close()
+
+    def run(self) -> None:
+        """Executa e exibe o diálogo principal do plugin."""
+        if self.dialog is None or not self.dialog.isVisible():
+            self.dialog = GeoInterseQDialog(self.iface)
+        self.dialog.show()
+        self.dialog.raise_()
+        self.dialog.activateWindow()
