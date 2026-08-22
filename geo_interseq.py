@@ -20,11 +20,12 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import Qt, QVariant, pyqtSignal, QMimeData
 from qgis.PyQt.QtGui import QIcon, QColor, QBrush, QFont, QPixmap, QGuiApplication
 from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsRasterLayer, QgsFeature, QgsGeometry,
+    Qgis, QgsProject, QgsVectorLayer, QgsRasterLayer, QgsFeature, QgsGeometry,
     QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsWkbTypes,
     QgsDistanceArea, QgsField, QgsUnitTypes, QgsPointXY,
     QgsPalettedRasterRenderer, QgsCategorizedSymbolRenderer,
-    QgsRendererCategory, QgsFillSymbol, QgsFeatureRequest, QgsMapLayer
+    QgsRendererCategory, QgsFillSymbol, QgsFeatureRequest, QgsMapLayer,
+    QgsMessageLog
 )
 from qgis.gui import QgsMapLayerComboBox
 from qgis.core import QgsMapLayerProxyModel
@@ -287,6 +288,15 @@ class GeoInterseQDialog(QDialog):
         self.spn_buffer_km.setFixedWidth(90)
         self.chk_spatial_filter.toggled.connect(self.spn_buffer_km.setEnabled)
 
+        self.chk_paired_mode: QCheckBox = QCheckBox(
+            'Modo pareado — interseção restrita por campo-chave e origem'
+        )
+        self.chk_paired_mode.setToolTip(
+            'Ative quando base e camada analisada compartilham um campo-chave (ex: id_par)\n'
+            'e um campo de origem (ex: contrato/rcp). A interseção será calculada\n'
+            'apenas entre feições de origens opostas dentro do mesmo par.'
+        )
+
         self.table: QTableWidget = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
             ['Tipo', 'Camada analisada', 'Classe', 'Área de interseção', '%']
@@ -342,6 +352,7 @@ class GeoInterseQDialog(QDialog):
         hl4.addWidget(self.spn_buffer_km)
         hl4.addStretch(1)
         left_layout.addLayout(hl4)
+        left_layout.addWidget(self.chk_paired_mode)
 
         left_layout.addWidget(QLabel('<b>Resultados:</b>'))
         left_layout.addWidget(self.table, stretch=1)
@@ -512,17 +523,94 @@ class GeoInterseQDialog(QDialog):
                 return
             pct_relative_to_base = pct_choice == pct_options[1]
 
+        paired_key_field: str | None = None
+        paired_origin_field: str | None = None
+        paired_base_value: str | None = None
+        paired_overlay_value: str | None = None
+
+        if isinstance(lyr, QgsVectorLayer) and self.chk_paired_mode.isChecked():
+            if not label_field:
+                QMessageBox.warning(
+                    self, 'Campo de rótulo necessário',
+                    'No modo pareado, o campo de rótulo selecionado será usado como\n'
+                    'chave de pareamento (ex: id_par). Selecione um campo válido.',
+                )
+                return
+            paired_key_field = label_field
+
+            fields_names: list[str] = [f.name() for f in lyr.fields()]
+            origin_f, ok = QInputDialog.getItem(
+                self,
+                'Campo de origem',
+                f'O campo "{paired_key_field}" será usado como chave de pareamento.\n\n'
+                'Selecione o campo que distingue os dois lados do par:\n'
+                '(ex: origem — contém "contrato" e "rcp")',
+                fields_names, 0, False,
+            )
+            if not ok:
+                return
+            paired_origin_field = origin_f
+
+            origin_values: list[str] = sorted({
+                str(f[paired_origin_field]).strip()
+                for f in lyr.getFeatures()
+                if f[paired_origin_field] is not None
+            })
+            if len(origin_values) < 2:
+                QMessageBox.warning(
+                    self, 'Campo de origem insuficiente',
+                    f'O campo "{paired_origin_field}" deve conter pelo menos '
+                    f'2 valores distintos.\nEncontrados: {origin_values}',
+                )
+                return
+
+            if len(origin_values) == 2:
+                paired_base_value = origin_values[0]
+                paired_overlay_value = origin_values[1]
+            else:
+                base_val, ok = QInputDialog.getItem(
+                    self,
+                    'Valor do lado BASE',
+                    'O campo de origem possui mais de 2 valores.\n'
+                    'Qual valor representa o lado BASE do par?',
+                    origin_values, 0, False,
+                )
+                if not ok:
+                    return
+                paired_base_value = base_val
+                remaining: list[str] = [v for v in origin_values if v != base_val]
+                if len(remaining) == 1:
+                    paired_overlay_value = remaining[0]
+                else:
+                    ov_val, ok = QInputDialog.getItem(
+                        self,
+                        'Valor do lado ANALISADO',
+                        'Qual valor representa o lado ANALISADO?',
+                        remaining, 0, False,
+                    )
+                    if not ok:
+                        return
+                    paired_overlay_value = ov_val
+
         prefix: str = _TYPE_RASTER if isinstance(lyr, QgsRasterLayer) else _TYPE_VECTOR
         label_info: str = f' [{label_field}]' if label_field else ''
         item: QListWidgetItem = QListWidgetItem(f'[{prefix}] {lyr.name()}{label_info}')
         item.setData(Qt.UserRole, lyr)
         item.setData(Qt.UserRole + 1, label_field)
         item.setData(Qt.UserRole + 2, pct_relative_to_base)
+        item.setData(Qt.UserRole + 3, paired_key_field)
+        item.setData(Qt.UserRole + 4, paired_origin_field)
+        item.setData(Qt.UserRole + 5, paired_base_value)
+        item.setData(Qt.UserRole + 6, paired_overlay_value)
         tip_pct: str = '% da camada base' if pct_relative_to_base else '% da feição analisada'
+        paired_info: str = (
+            f' | Pareado: {paired_key_field}/{paired_origin_field}'
+            if paired_key_field else ''
+        )
         item.setToolTip(
             'Análise pixel a pixel por classe (raster categórico inteiro)'
             if prefix == _TYPE_RASTER
-            else f'Campo de rótulo: {label_field} | {tip_pct}'
+            else f'Campo de rótulo: {label_field} | {tip_pct}{paired_info}'
         )
         self.overlay_list.addItem(item)
 
@@ -572,7 +660,8 @@ class GeoInterseQDialog(QDialog):
         self._insert_result_row_with_class(layer_type, name, '—', area_m2, percent)
 
     def _insert_result_row_with_class(
-        self, layer_type: str, name: str, class_label: str, area_m2: float, percent: float
+        self, layer_type: str, name: str, class_label: str, area_m2: float, percent: float,
+        *, warning: bool = False
     ) -> None:
         """Insere uma linha de resultado detalhada na tabela.
 
@@ -602,6 +691,14 @@ class GeoInterseQDialog(QDialog):
         bold.setBold(True)
         type_item.setFont(bold)
         type_item.setTextAlignment(Qt.AlignCenter)
+
+        if warning:
+            warn_brush: QBrush = QBrush(QColor('#FFF3CD'))
+            for col_idx in range(self.table.columnCount()):
+                w_item: QTableWidgetItem | None = self.table.item(row, col_idx)
+                if w_item:
+                    w_item.setBackground(warn_brush)
+                    w_item.setToolTip('⚠ Área de interseção excede a menor gleba do par')
 
     def run(self) -> None:
         """Executa a análise de interseção espacial espacial baseada nas configurações da GUI."""
@@ -720,11 +817,24 @@ class GeoInterseQDialog(QDialog):
                     continue
                 label_field: str | None = self.overlay_list.item(i).data(Qt.UserRole + 1)
                 pct_relative_to_base: bool = self.overlay_list.item(i).data(Qt.UserRole + 2) or False
-                self._process_vector_layer(
-                    lyr, base_union, base_area_m2, label_field,
-                    pct_relative_to_base, da, crs_measure, ctx, vec_out_layer,
-                    spatial_filter_rect
-                )
+                paired_key: str | None = self.overlay_list.item(i).data(Qt.UserRole + 3)
+                paired_origin: str | None = self.overlay_list.item(i).data(Qt.UserRole + 4)
+                paired_base_val: str | None = self.overlay_list.item(i).data(Qt.UserRole + 5)
+                paired_overlay_val: str | None = self.overlay_list.item(i).data(Qt.UserRole + 6)
+
+                if paired_key and paired_origin:
+                    self._process_vector_layer_paired(
+                        lyr, da, crs_measure, ctx, vec_out_layer,
+                        paired_key, paired_origin,
+                        paired_base_val, paired_overlay_val,
+                        pct_relative_to_base, label_field,
+                    )
+                else:
+                    self._process_vector_layer(
+                        lyr, base_union, base_area_m2, label_field,
+                        pct_relative_to_base, da, crs_measure, ctx, vec_out_layer,
+                        spatial_filter_rect,
+                    )
                 vec_out_used = True
 
         if vec_out_layer and vec_out_used:
@@ -839,6 +949,163 @@ class GeoInterseQDialog(QDialog):
                 out_feat.setGeometry(inter_geom)
                 out_feat.setAttributes([
                     _TYPE_VECTOR, lyr.name(), class_label, inter_area_m2, inter_area_m2 / 10000.0, percent
+                ])
+                out_layer.dataProvider().addFeatures([out_feat])
+
+    def _process_vector_layer_paired(
+        self, lyr: QgsVectorLayer, da: QgsDistanceArea,
+        crs_measure: QgsCoordinateReferenceSystem, ctx: object,
+        out_layer: QgsVectorLayer | None,
+        key_field: str, origin_field: str,
+        origin_base_value: str, origin_overlay_value: str,
+        pct_relative_to_base: bool, label_field: str | None,
+    ) -> None:
+        """Processa interseção vetorial no modo pareado por campo-chave e origem.
+
+        Itera sobre cada valor único do campo-chave, separa feições por origem
+        e calcula a interseção apenas entre origens opostas do mesmo par.
+
+        Args:
+            lyr: Camada vetorial contendo ambas origens.
+            da: Calculador de área geodésica.
+            crs_measure: CRS de medição (EPSG:4326).
+            ctx: Contexto de transformação do projeto.
+            out_layer: Camada de saída para geometrias intersectadas.
+            key_field: Nome do campo-chave de pareamento (ex: 'id_par').
+            origin_field: Nome do campo de origem (ex: 'origem').
+            origin_base_value: Valor de origem do lado base (ex: 'contrato').
+            origin_overlay_value: Valor de origem do lado analisado (ex: 'rcp').
+            pct_relative_to_base: Se True, % em relação à base; senão, à feição.
+            label_field: Campo de rótulo para a coluna 'class' na tabela.
+        """
+        from collections import defaultdict
+
+        try:
+            tr_ov = QgsCoordinateTransform(lyr.crs(), crs_measure, ctx)
+        except Exception as e:
+            QMessageBox.critical(
+                self, 'Erro de transformação', f'Falha no CRS: {e}'
+            )
+            return
+
+        # 1. Coletar e reprojetar todas as feições, agrupando por key_field
+        groups: dict[str, dict[str, list[QgsGeometry]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+
+        for feat in lyr.getFeatures():
+            g = feat.geometry()
+            if not g or g.isEmpty():
+                continue
+
+            key_val = feat[key_field]
+            origin_val = feat[origin_field]
+            if key_val is None or origin_val is None:
+                continue
+
+            key_str: str = str(key_val).strip()
+            origin_str: str = str(origin_val).strip().lower()
+
+            g2 = QgsGeometry(g)
+            try:
+                g2.transform(tr_ov)
+            except Exception:
+                continue
+            g2 = g2.makeValid()
+
+            groups[key_str][origin_str].append(g2)
+
+        origin_base_lower: str = origin_base_value.strip().lower()
+        origin_overlay_lower: str = origin_overlay_value.strip().lower()
+
+        # 2. Iterar sobre cada par
+        for key_val in sorted(groups.keys()):
+            origins = groups[key_val]
+            base_geoms: list[QgsGeometry] = origins.get(origin_base_lower, [])
+            overlay_geoms: list[QgsGeometry] = origins.get(origin_overlay_lower, [])
+
+            # Par incompleto
+            if not base_geoms or not overlay_geoms:
+                QgsMessageLog.logMessage(
+                    f'Par incompleto para {key_field}={key_val}. '
+                    f'Base ({origin_base_value}): {len(base_geoms)}, '
+                    f'Analisada ({origin_overlay_value}): {len(overlay_geoms)}',
+                    'GeoInterseQ', Qgis.Warning,
+                )
+                continue
+
+            # 3. Unir multi-partes da mesma origem
+            geom_base: QgsGeometry = base_geoms[0]
+            for g in base_geoms[1:]:
+                geom_base = geom_base.combine(g)
+            geom_base = geom_base.makeValid()
+
+            geom_overlay: QgsGeometry = overlay_geoms[0]
+            for g in overlay_geoms[1:]:
+                geom_overlay = geom_overlay.combine(g)
+            geom_overlay = geom_overlay.makeValid()
+
+            # 4. Calcular áreas individuais
+            area_base_m2: float = da.measureArea(geom_base)
+            area_overlay_m2: float = da.measureArea(geom_overlay)
+
+            # 5. Calcular interseção
+            inter_geom: QgsGeometry | None = geom_base.intersection(geom_overlay)
+            inter_geom = inter_geom.makeValid() if inter_geom else None
+            inter_area_m2: float = (
+                da.measureArea(inter_geom)
+                if inter_geom and not inter_geom.isEmpty()
+                else 0.0
+            )
+
+            # Sem interseção espacial — registrar resultado com 0 ha / 0%
+            if inter_area_m2 < 1.0:
+                class_label_zero: str = key_val
+                self._insert_result_row_with_class(
+                    _TYPE_VECTOR, lyr.name(), class_label_zero, 0.0, 0.0,
+                )
+                if out_layer:
+                    out_feat = QgsFeature()
+                    out_feat.setAttributes([
+                        _TYPE_VECTOR, lyr.name(), class_label_zero,
+                        0.0, 0.0, 0.0,
+                    ])
+                    out_layer.dataProvider().addFeatures([out_feat])
+                continue
+
+            # 6. Validação: inter_area <= min(base, overlay)
+            min_area: float = min(area_base_m2, area_overlay_m2)
+            warning: bool = False
+            if inter_area_m2 > min_area * 1.001:
+                warning = True
+                QgsMessageLog.logMessage(
+                    f'AVISO — {key_field}={key_val}: '
+                    f'área interseção ({inter_area_m2 / 10000:.4f} ha) > '
+                    f'min(base={area_base_m2 / 10000:.4f}, '
+                    f'overlay={area_overlay_m2 / 10000:.4f}) ha',
+                    'GeoInterseQ', Qgis.Warning,
+                )
+
+            # 7. Calcular percentual
+            denom: float = area_base_m2 if pct_relative_to_base else area_overlay_m2
+            percent: float = (inter_area_m2 / denom * 100.0) if denom > 0 else 0.0
+
+            # 8. Rótulo da classe
+            class_label: str = key_val
+
+            # 9. Inserir resultado na tabela
+            self._insert_result_row_with_class(
+                _TYPE_VECTOR, lyr.name(), class_label,
+                inter_area_m2, percent, warning=warning,
+            )
+
+            # 10. Gravar geometria na camada de saída
+            if out_layer and inter_geom and not inter_geom.isEmpty():
+                out_feat = QgsFeature()
+                out_feat.setGeometry(inter_geom)
+                out_feat.setAttributes([
+                    _TYPE_VECTOR, lyr.name(), class_label,
+                    inter_area_m2, inter_area_m2 / 10000.0, percent,
                 ])
                 out_layer.dataProvider().addFeatures([out_feat])
 

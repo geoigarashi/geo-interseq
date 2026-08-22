@@ -1,0 +1,62 @@
+🌐 GeoInterseQ — v1.2.0
+
+Data: 30 de maio de 2026
+
+✨ DESTAQUES
+
+📐 Recorte Vetorial Exato (Clip) de Rasters
+• O plugin agora executa uma operação de interseção exata (clip) com a Shapely nas classes raster vetorizadas utilizando os limites da camada base de polígonos.
+• Acabaram-se os serrilhados de pixels e as bordas que extrapolavam o polígono analisado.
+
+🌍 Paridade de 100% com a Calculadora de Campo do QGIS ($area)
+• A medição de área do raster foi migrada para cálculo geodésico elipsoidal via QgsDistanceArea do QGIS.
+• Elimina distorções sistemáticas causadas por distorções de projeções planares locais.
+
+🎨 Painel de Dicas e Tutorial Integrado
+• Nova janela de suporte à direita da interface com o logotipo da Plataforma Geo e Inovação e o ícone do GeoInterseQ dispostos lado a lado.
+• Acompanha um guia rápido e dicas de utilização para maximizar o desempenho da ferramenta.
+
+📏 Dimensionamento Inteligente e Responsividade
+• A janela se ajusta verticalmente ao tamanho do tutorial.
+• Inclui proteção para monitores de baixa resolução: redimensionamento dinâmico do layout e das imagens para nunca ultrapassar o limite de altura da tela do usuário.
+
+🖼️ Identidade Visual Completa no README
+• O README.md do plugin foi aprimorado para apresentar o ícone oficial da ferramenta e a marca corporativa lado a lado no cabeçalho.
+
+🔧 MELHORIAS
+
+✓ Organização do Projeto: Todas as camadas temporárias geradas são automaticamente agrupadas em um grupo na raiz das camadas chamado "Resultados GeoInterseQ".
+✓ Nova Coluna "area_ha": A tabela de atributos das camadas resultantes de interseção agora conta com a coluna da área convertida em hectares (area_ha).
+✓ Compatibilidade estrita com Ruff e type hinting do Python moderno (Python 3.12+).
+
+📦 INSTALAÇÃO
+
+Opção 1 — Via Interface do QGIS:
+• Plugins → Gerenciar e Instalar Plugins... → Instalar a partir de arquivo ZIP
+• Selecione o arquivo geointerseq_v1.2.0.zip
+• Clique em Instalar plugin
+
+Opção 2 — Manual:
+• Extrair o arquivo geointerseq_v1.2.0.zip na pasta:
+  %APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\
+• Reinicie o QGIS e ative em "Instalados"
+
+📋 COMPATIBILIDADE
+
+• QGIS 3.16+
+• Python 3.12+ (Ruff-compatible)
+• Dependências: Rasterio, Shapely, Pyproj, NumPy
+
+🐛 BUGS CORRIGIDOS
+
+✓ Corrigida a distorção sistemática de cálculo de área na análise raster.
+✓ Resolvido o problema de extrapolamento (pixel serrilhado) nas bordas das classes do raster.
+✓ Removido o logotipo duplicado no cabeçalho.
+
+🔗 LINKS
+
+• Repositório: https://github.com/geoigarashi/geo-interseq
+• Autoria: Plat. Geo e Inovação
+• Issues: https://github.com/geoigarashi/geo-interseq/issues
+
+Obrigado por utilizar o GeoInterseQ! 🙏
