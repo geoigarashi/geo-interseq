@@ -5,7 +5,7 @@
   <img src="Logo-GEO-HQ.svg" alt="Logotipo Plataforma Geo e Inovação" height="120" style="vertical-align: middle;">
 </p>
 
-**Versão 1.2.0** | **Autores:** Plat. Geo e Inovação
+**Versão 1.2.1** | **Autores:** Plat. Geo e Inovação
 
 ---
 
@@ -15,7 +15,7 @@ Plugin para o QGIS desenvolvido para calcular a área de interseção e o percen
 
 ### Principais Funcionalidades
 * **Análise vetor × vetor:** cruzamento espacial por feição, com campo de rótulo configurável.
-* **Análise vetor × raster:** cruzamento espacial por classe (raster categórico inteiro), garantindo paridade numérica com a metodologia adotada pelo InfoGEO.
+* **Análise vetor × raster:** cruzamento espacial por classe (raster categórico inteiro), garantindo paridade numérica com a metodologia adotada pelo InfoGEO e robustez total na reprojeção automática via `QgsCoordinateTransform`.
 * **Flexibilidade de Escopo:** dois modos de cálculo percentual disponíveis:
   * `% da feição analisada` (ex: quanto da gleba intersecta o imóvel).
   * `% da camada base` (ex: quanto do imóvel é coberto pela feição analisada).
@@ -30,7 +30,6 @@ Plugin para o QGIS desenvolvido para calcular a área de interseção e o percen
 2. **Para análise de camadas RASTER:**
    * `rasterio`
    * `shapely`
-   * `pyproj`
 
 > [!NOTE]
 > Caso alguma das dependências acima esteja ausente, o plugin exibirá um alerta ao iniciar o QGIS. A análise de dados puramente vetoriais continuará operacional.
@@ -43,7 +42,7 @@ Plugin para o QGIS desenvolvido para calcular a área de interseção e o percen
 1. Abra o **OSGeo4W Shell** como Administrador.
 2. Execute o comando:
    ```bash
-   pip install rasterio shapely pyproj
+   pip install rasterio shapely
    ```
 
 ### Opção B — Console Python do QGIS
@@ -51,7 +50,7 @@ Plugin para o QGIS desenvolvido para calcular a área de interseção e o percen
 2. Execute o seguinte trecho de código:
    ```python
    import subprocess, sys
-   subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'rasterio', 'shapely', 'pyproj'])
+   subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'rasterio', 'shapely'])
    ```
 
 Após a instalação das bibliotecas por qualquer uma das opções, reinicie o QGIS.
@@ -61,7 +60,7 @@ Após a instalação das bibliotecas por qualquer uma das opções, reinicie o Q
 ## Instalação do Plugin
 
 1. No QGIS, acesse: **Plugins > Gerenciar e Instalar Plugins > Instalar a partir de arquivo ZIP**.
-2. Selecione o arquivo `geointerseq_v1.2.0.zip` gerado.
+2. Selecione o arquivo `geointerseq_v1.2.1.zip` gerado em `plugins_zip/`.
 
 ---
 

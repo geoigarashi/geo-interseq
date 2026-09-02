@@ -1141,9 +1141,11 @@ class GeoInterseQDialog(QDialog):
         nodata = band.GetNoDataValue()
 
         gt = ds.GetGeoTransform()
-        raster_crs_wkt: str = ds.GetProjection()
-        raster_crs: QgsCoordinateReferenceSystem = QgsCoordinateReferenceSystem()
-        raster_crs.createFromWkt(raster_crs_wkt)
+        raster_crs: QgsCoordinateReferenceSystem = lyr.crs()
+        if not raster_crs.isValid():
+            raster_crs_wkt: str = ds.GetProjection()
+            raster_crs = QgsCoordinateReferenceSystem()
+            raster_crs.createFromWkt(raster_crs_wkt)
 
         if gt[2] != 0 or gt[4] != 0:
             QMessageBox.warning(
@@ -1153,45 +1155,29 @@ class GeoInterseQDialog(QDialog):
             ds = None
             return
 
-        try:
-            tr_to_raster = QgsCoordinateTransform(crs_measure, raster_crs, ctx)
-            base_in_raster_crs = QgsGeometry(base_union)
-            base_in_raster_crs.transform(tr_to_raster)
-            base_in_raster_crs = base_in_raster_crs.makeValid()
-        except Exception as e:
-            QMessageBox.critical(self, 'Erro de reprojeção', str(e))
-            ds = None
-            return
-
         import rasterio
         import rasterio.transform
         import rasterio.windows
         from rasterio.features import rasterize as rio_rasterize
         from rasterio.transform import xy as rasterio_xy
         from shapely import wkt as shapely_wkt
-        from pyproj import Transformer as ProjTransformer
+        from shapely.ops import unary_union as _sh_union
+        from shapely.validation import make_valid as _sh_make_valid
 
         shapely_geom = None
-        if base_source_wkt_list and base_source_crs is not None:
+        if base_source_wkt_list and base_source_crs is not None and base_source_crs.isValid():
             try:
-                from shapely.ops import transform as _sh_transform, unary_union as _sh_union
-                from shapely.validation import make_valid as _sh_make_valid
-
-                src_authid: str = base_source_crs.authid() or ''
-                dst_authid: str = raster_crs.authid() or ''
-                src_epsg: str | None = src_authid.split(':')[-1] if src_authid else None
-                dst_epsg: str | None = dst_authid.split(':')[-1] if dst_authid else None
-
-                geoms_src = [shapely_wkt.loads(w) for w in base_source_wkt_list]
-                geoms_src = [g for g in geoms_src if g is not None and not g.is_empty]
-
-                if src_epsg and dst_epsg and src_epsg != dst_epsg:
-                    _tr_base = ProjTransformer.from_crs(
-                        f'EPSG:{src_epsg}', f'EPSG:{dst_epsg}', always_xy=True
-                    )
-                    geoms_dst = [_sh_transform(_tr_base.transform, g) for g in geoms_src]
-                else:
-                    geoms_dst = geoms_src
+                tr_source_to_raster = QgsCoordinateTransform(base_source_crs, raster_crs, ctx)
+                geoms_dst = []
+                for w in base_source_wkt_list:
+                    qg = QgsGeometry.fromWkt(w)
+                    if qg.isNull() or qg.isEmpty():
+                        continue
+                    qg.transform(tr_source_to_raster)
+                    qg = qg.makeValid()
+                    sh_g = shapely_wkt.loads(qg.asWkt())
+                    if sh_g is not None and not sh_g.is_empty:
+                        geoms_dst.append(sh_g)
 
                 geoms_dst = [_sh_make_valid(g) for g in geoms_dst]
                 if len(geoms_dst) == 1:
@@ -1202,7 +1188,16 @@ class GeoInterseQDialog(QDialog):
                 shapely_geom = None
 
         if shapely_geom is None or shapely_geom.is_empty:
-            shapely_geom = shapely_wkt.loads(base_in_raster_crs.asWkt())
+            try:
+                tr_to_raster = QgsCoordinateTransform(crs_measure, raster_crs, ctx)
+                base_in_raster_crs = QgsGeometry(base_union)
+                base_in_raster_crs.transform(tr_to_raster)
+                base_in_raster_crs = base_in_raster_crs.makeValid()
+                shapely_geom = shapely_wkt.loads(base_in_raster_crs.asWkt())
+            except Exception as e:
+                QMessageBox.critical(self, 'Erro de reprojeção', str(e))
+                ds = None
+                return
 
         if shapely_geom is None or shapely_geom.is_empty:
             ds = None
@@ -1322,20 +1317,16 @@ class GeoInterseQDialog(QDialog):
         da.setSourceCrs(crs_measure, ctx)
         base_area_m2_ref: float = base_area_m2
 
-        # Preparar transformador para reprojetar da projeção do raster para EPSG:4326 (crs_measure)
-        _dst_epsg: str = crs_measure.authid().split(':')[-1]
-        _src_epsg_raster: str = raster_crs.authid().split(':')[-1]
+        # Preparar transformador nativo para reprojetar da projeção do raster para EPSG:4326 (crs_measure)
         try:
-            _tr_to_4326 = ProjTransformer.from_crs(
-                f'EPSG:{_src_epsg_raster}', f'EPSG:{_dst_epsg}', always_xy=True
-            ) if _src_epsg_raster != _dst_epsg else None
+            tr_raster_to_measure = QgsCoordinateTransform(raster_crs, crs_measure, ctx)
         except Exception:
-            _tr_to_4326 = None
+            tr_raster_to_measure = None
 
         unique_vals: np.ndarray = np.unique(pixel_array[frac > 0])
 
         areas_por_classe_m2: dict[int, float] = {}
-        geometrias_por_classe: dict[int, object] = {}
+        geometrias_por_classe: dict[int, QgsGeometry] = {}
 
         for val in unique_vals:
             class_val: int = int(val)
@@ -1355,18 +1346,17 @@ class GeoInterseQDialog(QDialog):
                     merged_intersect = _sh_make_valid(merged_intersect)
                     
                     if not merged_intersect.is_empty:
-                        # Reprojeta a geometria recortada para o CRS de medição (EPSG:4326)
-                        if _tr_to_4326 is not None:
-                            merged_4326 = _sh_tr_out(_tr_to_4326.transform, merged_intersect)
-                        else:
-                            merged_4326 = merged_intersect
+                        # Converte para QgsGeometry e reprojeta para o CRS de medição (EPSG:4326)
+                        qgs_geom = QgsGeometry.fromWkt(merged_intersect.wkt)
+                        if tr_raster_to_measure is not None and not qgs_geom.isNull() and not qgs_geom.isEmpty():
+                            qgs_geom.transform(tr_raster_to_measure)
+                            qgs_geom = qgs_geom.makeValid()
                         
-                        # Converte para QgsGeometry e calcula a área geodésica elipsoidal oficial
-                        qgs_geom = QgsGeometry.fromWkt(merged_4326.wkt)
+                        # Calcula a área geodésica elipsoidal oficial alinhada com o QGIS ($area)
                         class_area_m2 = da.measureArea(qgs_geom) if not qgs_geom.isEmpty() else 0.0
                         
                         areas_por_classe_m2[class_val] = class_area_m2
-                        geometrias_por_classe[class_val] = merged_4326
+                        geometrias_por_classe[class_val] = qgs_geom
             except Exception:
                 # Em caso de qualquer erro na interseção, mantém o cálculo estatístico por fração como fallback
                 class_area_m2 = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
@@ -1435,7 +1425,7 @@ class GeoInterseQDialog(QDialog):
                 geom_4326 = geometrias_por_classe[class_val]
                 try:
                     feat = QgsFeature()
-                    feat.setGeometry(QgsGeometry.fromWkt(geom_4326.wkt))
+                    feat.setGeometry(geom_4326)
                     feat.setAttributes([
                         _TYPE_RASTER, lyr.name(), class_label, area_m2, area_m2 / 10000.0, percent
                     ])
