@@ -28,6 +28,7 @@
 - 🛠️ **Eliminação do DeprecationWarning de Atributos (`QgsField`):** Atualização dos construtores de `QgsField` na geração de camadas de saída temporárias para a API moderna `QMetaType` (QGIS 3.38+), substituindo `QVariant.Type` com compatibilidade retroativa total.
 - 🛠️ **Tratamento Seguro de Exceções:** Inclusão de blocos `try...except ImportError` defensivos ao acessar métodos que exigem o `rasterio`.
 - 🛠️ **Conformidade PEP8 & Ruff:** Tipagem estrita Python 3.12+, uso exclusivo de `pathlib.Path` e docstrings detalhadas no formato Google.
+- 🛠️ **Eliminação do ResourceWarning no Pip Worker:** Gerenciamento determinístico de streams via context manager no pipe `stdout` do subprocesso assíncrono, evitando advertências de arquivos não fechados durante a coleta de lixo.
 
 
 

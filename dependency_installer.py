@@ -85,10 +85,11 @@ class DependencyInstallWorker(QThread):
             )
 
             if self._process.stdout:
-                for line in self._process.stdout:
-                    if self._is_cancelled:
-                        break
-                    self.line_received.emit(line.rstrip())
+                with self._process.stdout:
+                    for line in self._process.stdout:
+                        if self._is_cancelled:
+                            break
+                        self.line_received.emit(line.rstrip())
 
             self._process.wait()
 
@@ -107,12 +108,23 @@ class DependencyInstallWorker(QThread):
         except Exception as exc:
             self.finished.emit(False, f"Falha crítica ao executar o instalador: {exc}")
         finally:
+            if self._process is not None:
+                if self._process.stdout and not self._process.stdout.closed:
+                    try:
+                        self._process.stdout.close()
+                    except Exception:
+                        pass
             self._process = None
 
     def cancel(self) -> None:
         """Solicita o cancelamento da instalação e finaliza o subprocesso se ativo."""
         self._is_cancelled = True
         if self._process:
+            try:
+                if self._process.stdout and not self._process.stdout.closed:
+                    self._process.stdout.close()
+            except Exception:
+                pass
             try:
                 self._process.terminate()
             except Exception:
