@@ -3,9 +3,11 @@ name=GeoInterseQ
 qgisMinimumVersion=3.16
 qgisMaximumVersion=3.99
 description=Relata a área de interseção e o percentual de camadas vetoriais ou raster dentro de uma camada base de polígonos.
-about=Seleciona uma camada base (polígonos vetoriais) e múltiplas camadas analisadas (polígonos vetoriais ou rasters). Calcula a área de interseção e o percentual em relação à área total da camada analisada. Pode gerar camada de interseção temporária com simbologia e exportar resultados em CSV. Requisitos para análise raster: rasterio, shapely, pyproj (ver README.md).
-version=1.2.1
-changelog=1.2.1 — Correção crítica na reprojeção geométrica entre camadas base com arquivos .prj sem autoridade EPSG explícita e rasters em projeções distintas; integração com QgsCoordinateTransform nativo do QGIS eliminando a dependência frágil de pyproj/EPSG string; vetorização e cálculo geodésico elipsoidal das classes raster 100% integrados à API QGIS.
+about=Seleciona uma camada base (polígonos vetoriais) e múltiplas camadas analisadas (polígonos vetoriais ou rasters). Calcula a área de interseção e o percentual em relação à área total da camada analisada. Pode gerar camada de interseção temporária com simbologia e exportar resultados em CSV. Inclui assistente de instalação automática com 1 clique para dependências raster (rasterio e shapely).
+version=1.3.0
+changelog=1.3.0 — Assistente de autoinstalação com 1 clique das bibliotecas rasterio e shapely diretamente pelo QGIS (no perfil do usuário via pip --user, sem exigir privilégios de Administrador); remoção de alertas intrusivos no boot do QGIS; worker assíncrono com barra de progresso e console de log; recarga dinâmica a quente (hot-reload) no sys.path.
+  1.2.1 — Correção crítica na reprojeção geométrica entre camadas base com arquivos .prj sem autoridade EPSG explícita e rasters em projeções distintas; integração com QgsCoordinateTransform nativo do QGIS eliminando a dependência frágil de pyproj/EPSG string; vetorização e cálculo geodésico elipsoidal das classes raster 100% integrados à API QGIS.
+
   1.2.0 — Recorte vetorial exato (clip) das classes raster pela base; medição elipsoidal geodésica alinhada com a calculadora ($area); painel de tutorial e ajuda à direita com logotipos dinâmicos da ferramenta e da plataforma; ajuste responsivo de tamanho para resoluções baixas; agrupamento das camadas geradas sob "Resultados GeoInterseQ"; adição da coluna area_ha na tabela de atributos.
   1.1.7 — Verificação de dependências no carregamento: aviso ao usuário se rasterio/shapely/pyproj estiverem ausentes; README.md com instruções de instalação.
   1.1.6 — Botão "Exportar CSV" na barra de botões: exporta toda a tabela de resultados em CSV (separador ";", UTF-8 BOM para compatibilidade com Excel).

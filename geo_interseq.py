@@ -6,8 +6,9 @@ dentro de uma camada base de polígonos.
 """
 
 import configparser
-from pathlib import Path
 import csv
+from pathlib import Path
+import warnings
 import numpy as np
 from osgeo import gdal
 
@@ -17,12 +18,13 @@ from qgis.PyQt.QtWidgets import (
     QTableWidgetItem, QMessageBox, QFrame, QInputDialog, QFileDialog,
     QDoubleSpinBox, QWidget, QTextBrowser
 )
-from qgis.PyQt.QtCore import Qt, QVariant, pyqtSignal, QMimeData
+from qgis.PyQt.QtCore import Qt, QVariant, QMetaType, pyqtSignal, QMimeData
 from qgis.PyQt.QtGui import QIcon, QColor, QBrush, QFont, QPixmap, QGuiApplication
 from qgis.core import (
     Qgis, QgsProject, QgsVectorLayer, QgsRasterLayer, QgsFeature, QgsGeometry,
     QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsWkbTypes,
     QgsDistanceArea, QgsField, QgsUnitTypes, QgsPointXY,
+
     QgsPalettedRasterRenderer, QgsCategorizedSymbolRenderer,
     QgsRendererCategory, QgsFillSymbol, QgsFeatureRequest, QgsMapLayer,
     QgsMessageLog
@@ -106,7 +108,89 @@ def _accept_copy(event: object) -> None:
     event.accept()
 
 
+def _apply_layer_filters(combo: QgsMapLayerComboBox, polygon_only: bool = False) -> None:
+
+    """Aplica filtros de camadas no QgsMapLayerComboBox suprimindo DeprecationWarnings do QGIS 3.34+.
+
+    Args:
+        combo (QgsMapLayerComboBox): O widget de seleção de camadas do QGIS.
+        polygon_only (bool): Se True, filtra apenas polígonos. Se False, polígonos e rasters.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', DeprecationWarning)
+        # 1. Tenta API moderna com tipo explícito Qgis.LayerFilters (QGIS 3.34+)
+        if hasattr(Qgis, 'LayerFilters') and hasattr(Qgis, 'LayerFilter'):
+            try:
+                if polygon_only:
+                    f = Qgis.LayerFilters(Qgis.LayerFilter.PolygonLayer)
+                else:
+                    f = Qgis.LayerFilters(Qgis.LayerFilter.PolygonLayer) | Qgis.LayerFilters(
+                        Qgis.LayerFilter.RasterLayer
+                    )
+                combo.setFilters(f)
+                return
+            except Exception:
+                pass
+
+        # 2. Tenta com Qgis.LayerFilter individual
+        if hasattr(Qgis, 'LayerFilter'):
+            try:
+                if polygon_only:
+                    combo.setFilters(Qgis.LayerFilter.PolygonLayer)
+                else:
+                    combo.setFilters(
+                        Qgis.LayerFilter.PolygonLayer | Qgis.LayerFilter.RasterLayer
+                    )
+                return
+            except Exception:
+                pass
+
+        # 3. Fallback legado para QGIS < 3.34
+        try:
+            if polygon_only:
+                combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+            else:
+                combo.setFilters(
+                    QgsMapLayerProxyModel.PolygonLayer | QgsMapLayerProxyModel.RasterLayer
+                )
+        except Exception:
+            pass
+
+
+def _make_field(name: str, type_name: str) -> QgsField:
+    """Cria um QgsField de forma compatível entre QGIS moderno (QMetaType) e legado (QVariant).
+
+    Args:
+        name (str): Nome do atributo.
+        type_name (str): 'string' ou 'double'.
+
+    Returns:
+        QgsField: Campo configurado sem disparar DeprecationWarnings.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', DeprecationWarning)
+        if type_name == 'string':
+            type_val = (
+                getattr(getattr(QMetaType, 'Type', QMetaType), 'QString', None)
+                or getattr(QMetaType, 'QString', None)
+                or QVariant.String
+            )
+            return QgsField(name, type_val, 'string')
+        elif type_name == 'double':
+            type_val = (
+                getattr(getattr(QMetaType, 'Type', QMetaType), 'Double', None)
+                or getattr(QMetaType, 'Double', None)
+                or QVariant.Double
+            )
+            return QgsField(name, type_val, 'double')
+        return QgsField(name)
+
+
 class _DropLayerComboBox(QgsMapLayerComboBox):
+
+
     """QgsMapLayerComboBox com suporte a drag & drop do painel de camadas do QGIS."""
 
     def __init__(self, parent: object = None) -> None:
@@ -252,14 +336,14 @@ class GeoInterseQDialog(QDialog):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         self.base_combo: _DropLayerComboBox = _DropLayerComboBox()
-        self.base_combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+        _apply_layer_filters(self.base_combo, polygon_only=True)
         self.base_combo.setToolTip('Selecione pelo combo ou arraste uma camada do painel de Camadas')
         self.chk_base_selected: QCheckBox = QCheckBox('Usar apenas feições selecionadas da base')
 
         self.overlay_combo: _DropLayerComboBox = _DropLayerComboBox()
-        self.overlay_combo.setFilters(
-            QgsMapLayerProxyModel.PolygonLayer | QgsMapLayerProxyModel.RasterLayer
-        )
+        _apply_layer_filters(self.overlay_combo, polygon_only=False)
+
+
         self.btn_add_overlay: QPushButton = QPushButton('Adicionar camada analisada')
         self.overlay_list: _DropOverlayList = _DropOverlayList()
         self.overlay_list.setSelectionMode(self.overlay_list.ExtendedSelection)
@@ -490,8 +574,26 @@ class GeoInterseQDialog(QDialog):
             if self.overlay_list.item(i).data(Qt.UserRole) == lyr:
                 return
 
+        if isinstance(lyr, QgsRasterLayer):
+            try:
+                from .dependency_installer import DependencyManager, prompt_install_if_needed
+
+                if DependencyManager.get_missing_dependencies():
+                    installed: bool = prompt_install_if_needed(self)
+                    if not installed and DependencyManager.get_missing_dependencies():
+                        QMessageBox.warning(
+                            self,
+                            "GeoInterseQ — Camada Raster",
+                            f'A camada "{lyr.name()}" requer as bibliotecas rasterio e shapely.\n\n'
+                            "A camada não foi adicionada à lista porque as dependências não estão disponíveis.",
+                        )
+                        return
+            except Exception:
+                pass
+
         label_field: str | None = None
         pct_relative_to_base: bool = False
+
         if isinstance(lyr, QgsVectorLayer):
             fields: list[str] = [f.name() for f in lyr.fields()]
             if fields:
@@ -770,13 +872,14 @@ class GeoInterseQDialog(QDialog):
             )
             prov = vl.dataProvider()
             prov.addAttributes([
-                QgsField('type', QVariant.String),
-                QgsField('layer', QVariant.String),
-                QgsField('class', QVariant.String),
-                QgsField('area_m2', QVariant.Double),
-                QgsField('area_ha', QVariant.Double),
-                QgsField('percent', QVariant.Double),
+                _make_field('type', 'string'),
+                _make_field('layer', 'string'),
+                _make_field('class', 'string'),
+                _make_field('area_m2', 'double'),
+                _make_field('area_ha', 'double'),
+                _make_field('percent', 'double'),
             ])
+
             vl.updateFields()
             return vl
 
@@ -1155,14 +1258,26 @@ class GeoInterseQDialog(QDialog):
             ds = None
             return
 
-        import rasterio
-        import rasterio.transform
-        import rasterio.windows
-        from rasterio.features import rasterize as rio_rasterize
-        from rasterio.transform import xy as rasterio_xy
-        from shapely import wkt as shapely_wkt
-        from shapely.ops import unary_union as _sh_union
-        from shapely.validation import make_valid as _sh_make_valid
+        try:
+            import rasterio
+            import rasterio.transform
+            import rasterio.windows
+            from rasterio.features import rasterize as rio_rasterize
+            from rasterio.transform import xy as rasterio_xy
+            from shapely import wkt as shapely_wkt
+            from shapely.ops import unary_union as _sh_union
+            from shapely.validation import make_valid as _sh_make_valid
+        except ImportError as exc:
+            QMessageBox.critical(
+                self,
+                "GeoInterseQ — Dependências Ausentes",
+                f"Não foi possível carregar os módulos de análise raster: {exc}.\n\n"
+                "Instale as dependências usando o instalador do plugin ou reinicie o QGIS caso "
+                "tenha acabado de instalá-las.",
+            )
+            ds = None
+            return
+
 
         shapely_geom = None
         if base_source_wkt_list and base_source_crs is not None and base_source_crs.isValid():
@@ -1277,6 +1392,7 @@ class GeoInterseQDialog(QDialog):
                 _cy: float = (_bounds.bottom + _bounds.top) / 2.0
                 _zone: int = int((_cx + 180) / 6) + 1
                 _utm_epsg: int = (32600 + _zone) if _cy >= 0 else (32700 + _zone)
+                from pyproj import Transformer as ProjTransformer
                 _tr = ProjTransformer.from_crs(
                     _src.crs, f'EPSG:{_utm_epsg}', always_xy=True
                 )
@@ -1307,8 +1423,8 @@ class GeoInterseQDialog(QDialog):
         from shapely.ops import unary_union as _sh_union_out
         from shapely.geometry import shape as _sh_shape
         from shapely.validation import make_valid as _sh_make_valid
-        from shapely.ops import transform as _sh_tr_out
         from rasterio.features import shapes as rio_shapes
+
 
         # Inicializa o calculador de área geodésica do QGIS para manter coerência absoluta com o QGIS ($area)
         da = QgsDistanceArea()
@@ -1494,9 +1610,18 @@ class GeoInterseQPlugin:
             self.dialog.close()
 
     def run(self) -> None:
-        """Executa e exibe o diálogo principal do plugin."""
+        """Executa e exibe o diálogo principal do plugin, verificando dependências previamente."""
+        try:
+            from .dependency_installer import DependencyManager, prompt_install_if_needed
+
+            if DependencyManager.get_missing_dependencies():
+                prompt_install_if_needed(self.iface.mainWindow())
+        except Exception:
+            pass
+
         if self.dialog is None or not self.dialog.isVisible():
             self.dialog = GeoInterseQDialog(self.iface)
         self.dialog.show()
         self.dialog.raise_()
         self.dialog.activateWindow()
+

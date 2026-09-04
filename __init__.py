@@ -1,47 +1,41 @@
-# -*- coding: utf-8 -*-
-"""Módulo de inicialização do plugin GeoInterseQ para QGIS."""
+from __future__ import annotations
 
-def classFactory(iface: object) -> object:
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from qgis.gui import QgisInterface
+    from .geo_interseq import GeoInterseQPlugin
+
+
+def classFactory(iface: QgisInterface) -> GeoInterseQPlugin:
     """Fábrica de classe do QGIS para instanciar o plugin.
 
     Args:
-        iface (object): Interface principal do QGIS.
+        iface (QgisInterface): Interface principal do QGIS.
 
     Returns:
-        object: A instância principal do plugin GeoInterseQPlugin.
+        GeoInterseQPlugin: A instância principal do plugin GeoInterseQPlugin.
     """
-    _check_dependencies(iface)
+    _check_dependencies()
     from .geo_interseq import GeoInterseQPlugin
+
     return GeoInterseQPlugin(iface)
 
 
-def _check_dependencies(iface: object) -> None:
-    """Verifica se as dependências do plugin estão instaladas e exibe um aviso se faltarem.
-
-    Args:
-        iface (object): Interface principal do QGIS.
-    """
-    missing: list[str] = []
-    for pkg in ('rasterio', 'shapely', 'pyproj'):
-        try:
-            __import__(pkg)
-        except ImportError:
-            missing.append(pkg)
-
-    if not missing:
-        return
-
+def _check_dependencies() -> None:
+    """Verifica silenciosamente as dependências e registra em log sem interromper o boot do QGIS."""
     try:
-        from qgis.PyQt.QtWidgets import QMessageBox
-        QMessageBox.warning(
-            iface.mainWindow(),
-            'GeoInterseQ — dependências ausentes',
-            'As seguintes bibliotecas Python não foram encontradas:\n\n'
-            + '\n'.join(f'  • {p}' for p in missing)
-            + '\n\nA análise de camadas RASTER não funcionará.\n\n'
-            'Para instalar, abra o OSGeo4W Shell como administrador e execute:\n'
-            f'  pip install {" ".join(missing)}\n\n'
-            'Consulte o arquivo README.md do plugin para mais detalhes.'
-        )
+        from .dependency_installer import DependencyManager
+        from qgis.core import Qgis, QgsMessageLog
+
+        missing: list[str] = DependencyManager.get_missing_dependencies()
+        if missing:
+            QgsMessageLog.logMessage(
+                f"Bibliotecas para análise raster não detectadas: {', '.join(missing)}. "
+                "O assistente de instalação com 1 clique estará disponível ao abrir o GeoInterseQ.",
+                "GeoInterseQ",
+                Qgis.Info,
+            )
     except Exception:
         pass
+

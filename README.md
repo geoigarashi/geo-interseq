@@ -5,7 +5,7 @@
   <img src="Logo-GEO-HQ.svg" alt="Logotipo Plataforma Geo e Inovação" height="120" style="vertical-align: middle;">
 </p>
 
-**Versão 1.2.1** | **Autores:** Plat. Geo e Inovação
+**Versão 1.3.0** | **Autores:** Plat. Geo e Inovação
 
 ---
 
@@ -21,6 +21,7 @@ Plugin para o QGIS desenvolvido para calcular a área de interseção e o percen
   * `% da camada base` (ex: quanto do imóvel é coberto pela feição analisada).
 * **Camadas de Interseção:** geração de camadas temporárias de interseção com a simbologia original do raster aplicada automaticamente.
 * **Exportação de Resultados:** exportação direta dos dados calculados em formato CSV (separador `;`, codificação UTF-8 com BOM para total compatibilidade com Excel).
+* **Assistente de Dependências com 1 Clique:** instalação automatizada das bibliotecas `rasterio` e `shapely` no perfil do usuário (`--user`), dispensando privilégios de Administrador.
 
 ---
 
@@ -31,36 +32,42 @@ Plugin para o QGIS desenvolvido para calcular a área de interseção e o percen
    * `rasterio`
    * `shapely`
 
-> [!NOTE]
-> Caso alguma das dependências acima esteja ausente, o plugin exibirá um alerta ao iniciar o QGIS. A análise de dados puramente vetoriais continuará operacional.
+> [!TIP]
+> **Instalação Automática com 1 Clique:**
+> Ao abrir o GeoInterseQ ou ao adicionar uma camada raster pela primeira vez, o plugin detectará se as bibliotecas estão presentes e oferecerá a instalação automática com um clique. Não é necessário abrir o terminal ou ter privilégios de Administrador.
 
 ---
 
 ## Instalação de Dependências
 
-### Opção A — OSGeo4W Shell (Recomendado)
-1. Abra o **OSGeo4W Shell** como Administrador.
+### Opção A — Assistente Integrado do Plugin (Recomendado)
+1. Abra o **GeoInterseQ** no QGIS.
+2. Se faltarem bibliotecas, confirme o diálogo clicando em **Sim** ou abra o assistente integrado.
+3. Clique em **Instalar Dependências** e aguarde a barra de progresso.
+4. As bibliotecas são instaladas com `--user` e vinculadas à sessão em tempo real.
+
+### Opção B — Instalação Manual via OSGeo4W Shell
+1. Abra o **OSGeo4W Shell** (como Administrador ou usuário comum com `--user`).
 2. Execute o comando:
    ```bash
-   pip install rasterio shapely
+   pip install --user rasterio shapely
    ```
 
-### Opção B — Console Python do QGIS
+### Opção C — Console Python do QGIS
 1. No menu principal do QGIS, acesse **Plugins > Console Python**.
 2. Execute o seguinte trecho de código:
    ```python
    import subprocess, sys
-   subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'rasterio', 'shapely'])
+   subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user', 'rasterio', 'shapely'])
    ```
-
-Após a instalação das bibliotecas por qualquer uma das opções, reinicie o QGIS.
 
 ---
 
 ## Instalação do Plugin
 
 1. No QGIS, acesse: **Plugins > Gerenciar e Instalar Plugins > Instalar a partir de arquivo ZIP**.
-2. Selecione o arquivo `geointerseq_v1.2.1.zip` gerado em `plugins_zip/`.
+2. Selecione o arquivo `geointerseq_v1.3.0.zip` gerado em `plugins_zip/`.
+
 
 ---
 
