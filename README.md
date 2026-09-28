@@ -5,7 +5,7 @@
   <img src="Logo-GEO-HQ.svg" alt="Logotipo Plataforma Geo e Inovação" height="120" style="vertical-align: middle;">
 </p>
 
-**Versão 1.3.0** | **Autores:** Plat. Geo e Inovação
+**Versão 1.4.0** | **Autores:** Plat. Geo e Inovação
 
 ---
 
@@ -16,12 +16,25 @@ Plugin para o QGIS desenvolvido para calcular a área de interseção e o percen
 ### Principais Funcionalidades
 * **Análise vetor × vetor:** cruzamento espacial por feição, com campo de rótulo configurável.
 * **Análise vetor × raster:** cruzamento espacial por classe (raster categórico inteiro), garantindo paridade numérica com a metodologia adotada pelo InfoGEO e robustez total na reprojeção automática via `QgsCoordinateTransform`.
+* **Áreas planas em UTM/SIRGAS 2000 (v1.4.0):** interseções e áreas medidas em metros na projeção UTM do fuso local, com paridade com `area($geometry)` do QGIS e com memoriais/laudos (ver [Metodologia de Cálculo](#metodologia-de-cálculo-de-área)).
 * **Flexibilidade de Escopo:** dois modos de cálculo percentual disponíveis:
   * `% da feição analisada` (ex: quanto da gleba intersecta o imóvel).
   * `% da camada base` (ex: quanto do imóvel é coberto pela feição analisada).
 * **Camadas de Interseção:** geração de camadas temporárias de interseção com a simbologia original do raster aplicada automaticamente.
 * **Exportação de Resultados:** exportação direta dos dados calculados em formato CSV (separador `;`, codificação UTF-8 com BOM para total compatibilidade com Excel).
 * **Assistente de Dependências com 1 Clique:** instalação automatizada das bibliotecas `rasterio` e `shapely` no perfil do usuário (`--user`), dispensando privilégios de Administrador.
+
+---
+
+## Metodologia de Cálculo de Área
+
+* **Projeção métrica plana dinâmica:** a interseção (GEOS) e as áreas são calculadas em metros, na projeção **SIRGAS 2000 / UTM** do fuso do centróide de cada par/feição/base (EPSG 31977–31985 no hemisfério Sul e 31965–31976 no Norte; fallback para WGS 84 / UTM fora da cobertura SIRGAS).
+* **Área cartesiana:** `geom.area()` no plano UTM — idêntica à expressão `area($geometry)` da Calculadora de Campos e a softwares de topografia/CAD. Não usa mais `QgsDistanceArea`/`$area` elipsoidal.
+* **Sem passar por EPSG:4326:** a camada base permanece no CRS nativo e é projetada diretamente para o UTM, evitando erros de transformações encadeadas.
+* **Rastreabilidade:** coluna **Fuso UTM** na tabela, na camada de saída (`fuso_utm`) e no CSV.
+* **Glebas transfronteiriças:** geometrias que cruzam o meridiano divisor de fusos não são fatiadas; o cálculo é unificado no fuso do centróide e o rótulo recebe o sufixo `(borda)` (com registro no `QgsMessageLog`).
+* **Camadas de saída:** geradas no CRS do projeto ativo. Os campos `area_m2`/`area_ha` continuam com a área UTM plana.
+* **Ordem das colunas:** `type`, `layer`, `class`, `fuso_utm`, `area_m2`, `area_ha`, `percent`.
 
 ---
 
@@ -66,7 +79,7 @@ Plugin para o QGIS desenvolvido para calcular a área de interseção e o percen
 ## Instalação do Plugin
 
 1. No QGIS, acesse: **Plugins > Gerenciar e Instalar Plugins > Instalar a partir de arquivo ZIP**.
-2. Selecione o arquivo `geointerseq_v1.3.0.zip` gerado em `plugins_zip/`.
+2. Selecione o arquivo `geointerseq_v1.4.0.zip` gerado em `plugins_zip/`.
 
 
 ---
