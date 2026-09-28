@@ -23,7 +23,7 @@ from qgis.PyQt.QtGui import QIcon, QColor, QBrush, QFont, QPixmap, QGuiApplicati
 from qgis.core import (
     Qgis, QgsProject, QgsVectorLayer, QgsRasterLayer, QgsFeature, QgsGeometry,
     QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsWkbTypes,
-    QgsDistanceArea, QgsField, QgsUnitTypes, QgsPointXY,
+    QgsField, QgsUnitTypes, QgsPointXY, QgsCsException,
 
     QgsPalettedRasterRenderer, QgsCategorizedSymbolRenderer,
     QgsRendererCategory, QgsFillSymbol, QgsFeatureRequest, QgsMapLayer,
@@ -31,6 +31,13 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapLayerComboBox
 from qgis.core import QgsMapLayerProxyModel
+
+from .percent_utils import safe_percent
+from .utm_zone import UtmZone
+from .utm_projection import (
+    BaseFootprint, UtmTransformCache, union_geometries, wgs84_crs,
+    zone_for_geometry, zone_for_wgs84_extent,
+)
 
 try:
     from qgis.PyQt.QtSvg import QSvgWidget
@@ -303,6 +310,7 @@ class GeoInterseQDialog(QDialog):
         """
         super().__init__(iface.mainWindow())
         self.iface: object = iface
+        self._cross_zone_logged: set[tuple[int, int, int]] = set()
         self.setWindowTitle('GeoInterseQ — Área e % da Analisada dentro da Base')
 
         # Obter geometria da tela para dimensionamento responsivo
@@ -381,9 +389,9 @@ class GeoInterseQDialog(QDialog):
             'apenas entre feições de origens opostas dentro do mesmo par.'
         )
 
-        self.table: QTableWidget = QTableWidget(0, 5)
+        self.table: QTableWidget = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ['Tipo', 'Camada analisada', 'Classe', 'Área de interseção', '%']
+            ['Tipo', 'Camada analisada', 'Classe', 'Fuso UTM', 'Área de interseção', '%']
         )
         hdr = self.table.horizontalHeader()
         hdr.setStretchLastSection(True)
@@ -393,6 +401,7 @@ class GeoInterseQDialog(QDialog):
         )
         self.table.setColumnWidth(0, 55)
         self.table.setColumnWidth(2, 180)
+        self.table.setColumnWidth(3, 170)
         self.table.setAlternatingRowColors(True)
 
         self.btn_run: QPushButton = QPushButton('Calcular')
@@ -542,6 +551,7 @@ class GeoInterseQDialog(QDialog):
             </ul>
           </li>
           <li><b>Modo Raster:</b> Calcula a área pixel a pixel por classe. Mapeia automaticamente a legenda e cores configuradas no QGIS.</li>
+          <li><b>Áreas (UTM/SIRGAS 2000):</b> Interseções e áreas são calculadas em metros planos na projeção UTM do fuso local (coluna <i>Fuso UTM</i>), igual a <code>area($geometry)</code> do QGIS. Glebas que cruzam o meridiano divisor de fusos são marcadas com <i>(borda)</i>.</li>
           <li><b>Gerar Camada:</b> Vetores e classes do raster intersectados serão exportados como camadas temporárias no mapa.</li>
         </ul>
         """
@@ -763,7 +773,7 @@ class GeoInterseQDialog(QDialog):
 
     def _insert_result_row_with_class(
         self, layer_type: str, name: str, class_label: str, area_m2: float, percent: float,
-        *, warning: bool = False
+        *, warning: bool = False, fuso_utm: str = ''
     ) -> None:
         """Insere uma linha de resultado detalhada na tabela.
 
@@ -771,16 +781,28 @@ class GeoInterseQDialog(QDialog):
             layer_type (str): Tipo da camada (Vetor/Raster).
             name (str): Nome da camada analisada.
             class_label (str): Classe ou rótulo da feição.
-            area_m2 (float): Área de interseção em m².
+            area_m2 (float): Área de interseção em m² (plana, na projeção UTM do fuso).
             percent (float): Percentual da interseção.
+            warning (bool): Destaca a linha quando a interseção excede a menor gleba do par.
+            fuso_utm (str): Rótulo do fuso UTM usado na medição (ex: "SIRGAS 2000 / UTM 22S").
         """
         row: int = self.table.rowCount()
         self.table.insertRow(row)
         pct_text: str = f"{percent:.2f} %" if area_m2 > 0 else '0,00 %'
-        for col, text in enumerate([layer_type, name, class_label, self._format_area(area_m2), pct_text]):
+        cells: list[str] = [
+            layer_type, name, class_label, fuso_utm or '—', self._format_area(area_m2), pct_text
+        ]
+        for col, text in enumerate(cells):
             item: QTableWidgetItem = QTableWidgetItem(text)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, col, item)
+
+        if fuso_utm:
+            self.table.item(row, 3).setToolTip(
+                f'Área plana calculada na projeção {fuso_utm.replace(" (borda)", "")}.'
+                + ('\nGleba transfronteiriça: cruza o meridiano divisor de fusos; '
+                   'cálculo unificado no fuso do centróide.' if fuso_utm.endswith('(borda)') else '')
+            )
 
         type_item: QTableWidgetItem = self.table.item(row, 0)
         if layer_type == _TYPE_VECTOR:
@@ -820,46 +842,28 @@ class GeoInterseQDialog(QDialog):
             QMessageBox.warning(self, 'Aviso', 'A camada base não possui feições (ou nenhuma está selecionada).')
             return
 
-        crs_measure: QgsCoordinateReferenceSystem = QgsCoordinateReferenceSystem('EPSG:4326')
         ctx: object = QgsProject.instance().transformContext()
+        self._cross_zone_logged.clear()
 
-        base_geoms: list[QgsGeometry] = []
-        for f in base_feats:
-            g: QgsGeometry = f.geometry()
-            if not g or g.isEmpty():
-                continue
-            g2: QgsGeometry = QgsGeometry(g)
-            if base.crs() != crs_measure:
-                try:
-                    tr = QgsCoordinateTransform(base.crs(), crs_measure, ctx)
-                    g2.transform(tr)
-                except Exception as e:
-                    QMessageBox.critical(self, 'Erro de transformação', f'Falha ao reprojetar base: {e}')
-                    return
-            base_geoms.append(g2)
+        # Camadas de saída no CRS do projeto; áreas medidas em UTM plana por fuso.
+        out_crs: QgsCoordinateReferenceSystem = QgsProject.instance().crs()
+        if not out_crs.isValid():
+            out_crs = wgs84_crs()
 
-        if not base_geoms:
+        # Base mantida no CRS nativo (sem passar por EPSG:4326) para preservar precisão.
+        base_native_geoms: list[QgsGeometry] = [
+            QgsGeometry(f.geometry()) for f in base_feats
+            if f.geometry() and not f.geometry().isEmpty()
+        ]
+        if not base_native_geoms:
             QMessageBox.critical(self, 'Erro', 'Geometrias inválidas na base.')
             return
 
-        base_union: QgsGeometry = base_geoms[0]
-        for g in base_geoms[1:]:
-            base_union = base_union.combine(g)
-        base_union = base_union.makeValid()
-
-        da: QgsDistanceArea = QgsDistanceArea()
-        ell: str = QgsProject.instance().ellipsoid() or 'WGS84'
-        da.setEllipsoid(ell)
-        da.setSourceCrs(crs_measure, ctx)
-
-        base_area_m2: float = da.measureArea(base_union)
-
-        base_source_wkt_list: list[str] = []
-        for f in base_feats:
-            g = f.geometry()
-            if g and not g.isEmpty():
-                base_source_wkt_list.append(g.asWkt())
-        base_source_crs: QgsCoordinateReferenceSystem = base.crs()
+        try:
+            footprint: BaseFootprint = BaseFootprint(base_native_geoms, base.crs(), ctx)
+        except QgsCsException as e:
+            QMessageBox.critical(self, 'Erro de transformação', f'Falha ao reprojetar base: {e}')
+            return
 
         self.table.setRowCount(0)
         self.btn_export_csv.setEnabled(False)
@@ -867,14 +871,14 @@ class GeoInterseQDialog(QDialog):
         create_layer: bool = self.chk_create_layer.isChecked()
 
         def _make_out_layer(name: str) -> QgsVectorLayer:
-            vl = QgsVectorLayer(
-                f"MultiPolygon?crs={crs_measure.authid()}", name, 'memory'
-            )
+            vl = QgsVectorLayer("MultiPolygon", name, 'memory')
+            vl.setCrs(out_crs)
             prov = vl.dataProvider()
             prov.addAttributes([
                 _make_field('type', 'string'),
                 _make_field('layer', 'string'),
                 _make_field('class', 'string'),
+                _make_field('fuso_utm', 'string'),
                 _make_field('area_m2', 'double'),
                 _make_field('area_ha', 'double'),
                 _make_field('percent', 'double'),
@@ -889,7 +893,7 @@ class GeoInterseQDialog(QDialog):
         spatial_filter_rect: QgsGeometry | None = None
         if self.chk_spatial_filter.isChecked():
             buf_m: float = self.spn_buffer_km.value() * 1000.0
-            bbox = base_union.boundingBox()
+            bbox = footprint.wgs84_union.boundingBox()
             bbox.grow(buf_m / 111320.0)
             spatial_filter_rect = bbox
 
@@ -906,10 +910,7 @@ class GeoInterseQDialog(QDialog):
 
             if isinstance(lyr, QgsRasterLayer):
                 raster_out: QgsVectorLayer | None = _make_out_layer(f'Interseção — {lyr.name()}') if create_layer else None
-                self._process_raster_layer(
-                    lyr, base_union, base_area_m2, crs_measure, ctx, raster_out,
-                    base_source_wkt_list, base_source_crs
-                )
+                self._process_raster_layer(lyr, footprint, out_crs, ctx, raster_out)
                 if raster_out and create_layer:
                     raster_out.updateExtents()
                     project.addMapLayer(raster_out, False)
@@ -927,15 +928,15 @@ class GeoInterseQDialog(QDialog):
 
                 if paired_key and paired_origin:
                     self._process_vector_layer_paired(
-                        lyr, da, crs_measure, ctx, vec_out_layer,
+                        lyr, out_crs, ctx, vec_out_layer,
                         paired_key, paired_origin,
                         paired_base_val, paired_overlay_val,
                         pct_relative_to_base, label_field,
                     )
                 else:
                     self._process_vector_layer(
-                        lyr, base_union, base_area_m2, label_field,
-                        pct_relative_to_base, da, crs_measure, ctx, vec_out_layer,
+                        lyr, footprint, label_field,
+                        pct_relative_to_base, out_crs, ctx, vec_out_layer,
                         spatial_filter_rect,
                     )
                 vec_out_used = True
@@ -976,37 +977,83 @@ class GeoInterseQDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, 'Erro ao exportar', str(e))
 
+    def _log_cross_zone(self, zone: UtmZone, context: str) -> None:
+        """Registra (uma vez por combinação de fusos) a detecção de gleba transfronteiriça.
+
+        Args:
+            zone (UtmZone): Fuso resolvido para a geometria.
+            context (str): Descrição do local da detecção (camada/par).
+        """
+        key: tuple[int, int, int] = (zone.epsg, zone.zone_min, zone.zone_max)
+        if not zone.is_cross_zone or key in self._cross_zone_logged:
+            return
+        self._cross_zone_logged.add(key)
+        QgsMessageLog.logMessage(
+            f'Gleba transfronteiriça detectada entre os fusos UTM {zone.zone_min} e {zone.zone_max} '
+            f'({context}). Cálculo unificado no Fuso {zone.zone} pelo centróide.',
+            'GeoInterseQ', Qgis.Info,
+        )
+
+    @staticmethod
+    def _zone_for_overlap(
+        feat_bbox: object, to_wgs84: QgsCoordinateTransform, base_bbox_wgs84: object
+    ) -> UtmZone:
+        """Resolve o fuso UTM pelo envelope de sobreposição entre a feição e a base.
+
+        Usar a região efetivamente comparada evita escolher um fuso distante quando a
+        feição analisada é muito maior que a base.
+
+        Args:
+            feat_bbox (QgsRectangle): Envelope da feição no CRS da camada.
+            to_wgs84 (QgsCoordinateTransform): Transformação camada -> EPSG:4326.
+            base_bbox_wgs84 (QgsRectangle): Envelope da base em EPSG:4326.
+
+        Returns:
+            UtmZone: Fuso do centro do envelope de sobreposição (ou da feição, se disjuntos).
+
+        Raises:
+            QgsCsException: Se o envelope não puder ser transformado.
+        """
+        feat_wgs = to_wgs84.transformBoundingBox(feat_bbox)
+        overlap = feat_wgs.intersect(base_bbox_wgs84)
+        ref = feat_wgs if overlap.isNull() or overlap.isEmpty() else overlap
+        return zone_for_wgs84_extent(ref.center(), ref)
+
     def _process_vector_layer(
-        self, lyr: QgsVectorLayer, base_union: QgsGeometry, base_area_m2: float,
-        label_field: str | None, pct_relative_to_base: bool, da: QgsDistanceArea,
-        crs_measure: QgsCoordinateReferenceSystem, ctx: object,
+        self, lyr: QgsVectorLayer, footprint: BaseFootprint,
+        label_field: str | None, pct_relative_to_base: bool,
+        out_crs: QgsCoordinateReferenceSystem, ctx: object,
         out_layer: QgsVectorLayer | None, spatial_filter_rect: object = None
     ) -> None:
-        """Processa a interseção com uma camada vetorial de polígonos.
+        """Processa a interseção com uma camada vetorial de polígonos em UTM plana.
+
+        Para cada feição, o fuso UTM/SIRGAS 2000 é escolhido pelo envelope de sobreposição
+        com a base; interseção e áreas são calculadas em metros planos nesse fuso.
 
         Args:
             lyr (QgsVectorLayer): Camada vetorial analisada.
-            base_union (QgsGeometry): Geometria unificada da camada base.
-            base_area_m2 (float): Área total da camada base em m².
+            footprint (BaseFootprint): Base (CRS nativo) materializável em qualquer fuso.
             label_field (str | None): Nome do campo de rótulo para identificação.
             pct_relative_to_base (bool): Se True, calcula % em relação à base. Senão, em relação à feição.
-            da (QgsDistanceArea): Ferramenta de cálculo de área com elipsoide do QGIS.
-            crs_measure (QgsCoordinateReferenceSystem): CRS para cálculo métrico (WGS84).
+            out_crs (QgsCoordinateReferenceSystem): CRS das geometrias de saída (projeto).
             ctx (object): Contexto de transformação do projeto.
             out_layer (QgsVectorLayer | None): Camada de saída para guardar geometrias intersectadas.
-            spatial_filter_rect (object, optional): Bounding box opcional para o filtro espacial.
+            spatial_filter_rect (object, optional): Bounding box (EPSG:4326) do filtro espacial.
         """
-        try:
-            tr_ov = QgsCoordinateTransform(lyr.crs(), crs_measure, ctx)
-        except Exception as e:
-            QMessageBox.critical(self, 'Erro de transformação', f'Falha no CRS da camada {lyr.name()}: {e}')
+        if not lyr.crs().isValid():
+            QMessageBox.critical(self, 'Erro de transformação', f'CRS inválido na camada {lyr.name()}.')
             return
+
+        wgs84 = wgs84_crs()
+        to_wgs84 = QgsCoordinateTransform(lyr.crs(), wgs84, ctx)
+        cache = UtmTransformCache(lyr.crs(), out_crs, ctx)
+        base_bbox_wgs84 = footprint.wgs84_union.boundingBox()
 
         if spatial_filter_rect is not None:
             try:
-                tr_rect = QgsCoordinateTransform(crs_measure, lyr.crs(), ctx)
+                tr_rect = QgsCoordinateTransform(wgs84, lyr.crs(), ctx)
                 filter_rect = tr_rect.transformBoundingBox(spatial_filter_rect)
-            except Exception:
+            except QgsCsException:
                 filter_rect = spatial_filter_rect
             request = QgsFeatureRequest().setFilterRect(filter_rect)
         else:
@@ -1016,62 +1063,68 @@ class GeoInterseQDialog(QDialog):
             g = feat.geometry()
             if not g or g.isEmpty():
                 continue
-            g2 = QgsGeometry(g)
+
             try:
-                g2.transform(tr_ov)
-            except Exception:
+                zone: UtmZone = self._zone_for_overlap(g.boundingBox(), to_wgs84, base_bbox_wgs84)
+                g_utm: QgsGeometry = cache.project_to_utm(g, zone)
+                base_utm: QgsGeometry = footprint.in_zone(zone)
+            except QgsCsException:
                 continue
-            g2 = g2.makeValid()
+            self._log_cross_zone(zone, lyr.name())
 
-            feat_area_m2: float = da.measureArea(g2)
+            feat_area_m2: float = g_utm.area()
 
-            inter_geom = g2.intersection(base_union)
-            inter_geom = inter_geom.makeValid() if inter_geom else None
+            inter_utm: QgsGeometry | None = g_utm.intersection(base_utm)
+            inter_utm = inter_utm.makeValid() if inter_utm else None
             inter_area_m2: float = (
-                da.measureArea(inter_geom) if inter_geom and not inter_geom.isEmpty() else 0.0
+                inter_utm.area() if inter_utm and not inter_utm.isEmpty() else 0.0
             )
 
             if inter_area_m2 < 1.0:
                 continue
 
-            if pct_relative_to_base:
-                denom = base_area_m2
-            else:
-                denom = feat_area_m2
-            percent: float = (inter_area_m2 / denom * 100.0) if denom > 0 else 0.0
+            denom: float = footprint.area_in_zone(zone) if pct_relative_to_base else feat_area_m2
+            percent: float = safe_percent(inter_area_m2, denom)
 
             if label_field:
                 class_label: str = str(feat[label_field]) if feat[label_field] is not None else f'FID {feat.id()}'
             else:
                 class_label = f'FID {feat.id()}'
 
-            self._insert_result_row_with_class(_TYPE_VECTOR, lyr.name(), class_label, inter_area_m2, percent)
+            self._insert_result_row_with_class(
+                _TYPE_VECTOR, lyr.name(), class_label, inter_area_m2, percent, fuso_utm=zone.label
+            )
 
-            if out_layer and inter_geom and not inter_geom.isEmpty():
+            if out_layer and inter_utm and not inter_utm.isEmpty():
+                try:
+                    inter_out: QgsGeometry = cache.utm_to_output(inter_utm, zone)
+                except QgsCsException:
+                    continue
                 out_feat = QgsFeature()
-                out_feat.setGeometry(inter_geom)
+                out_feat.setGeometry(inter_out)
                 out_feat.setAttributes([
-                    _TYPE_VECTOR, lyr.name(), class_label, inter_area_m2, inter_area_m2 / 10000.0, percent
+                    _TYPE_VECTOR, lyr.name(), class_label, zone.label,
+                    inter_area_m2, inter_area_m2 / 10000.0, percent
                 ])
                 out_layer.dataProvider().addFeatures([out_feat])
 
     def _process_vector_layer_paired(
-        self, lyr: QgsVectorLayer, da: QgsDistanceArea,
-        crs_measure: QgsCoordinateReferenceSystem, ctx: object,
+        self, lyr: QgsVectorLayer,
+        out_crs: QgsCoordinateReferenceSystem, ctx: object,
         out_layer: QgsVectorLayer | None,
         key_field: str, origin_field: str,
         origin_base_value: str, origin_overlay_value: str,
         pct_relative_to_base: bool, label_field: str | None,
     ) -> None:
-        """Processa interseção vetorial no modo pareado por campo-chave e origem.
+        """Processa interseção vetorial no modo pareado por campo-chave e origem, em UTM plana.
 
         Itera sobre cada valor único do campo-chave, separa feições por origem
-        e calcula a interseção apenas entre origens opostas do mesmo par.
+        e calcula a interseção apenas entre origens opostas do mesmo par. Cada par
+        usa o fuso UTM/SIRGAS 2000 do centróide conjunto das suas geometrias.
 
         Args:
             lyr: Camada vetorial contendo ambas origens.
-            da: Calculador de área geodésica.
-            crs_measure: CRS de medição (EPSG:4326).
+            out_crs: CRS das geometrias de saída (projeto).
             ctx: Contexto de transformação do projeto.
             out_layer: Camada de saída para geometrias intersectadas.
             key_field: Nome do campo-chave de pareamento (ex: 'id_par').
@@ -1083,15 +1136,15 @@ class GeoInterseQDialog(QDialog):
         """
         from collections import defaultdict
 
-        try:
-            tr_ov = QgsCoordinateTransform(lyr.crs(), crs_measure, ctx)
-        except Exception as e:
+        if not lyr.crs().isValid():
             QMessageBox.critical(
-                self, 'Erro de transformação', f'Falha no CRS: {e}'
+                self, 'Erro de transformação', f'CRS inválido na camada {lyr.name()}.'
             )
             return
 
-        # 1. Coletar e reprojetar todas as feições, agrupando por key_field
+        cache = UtmTransformCache(lyr.crs(), out_crs, ctx)
+
+        # 1. Coletar geometrias nativas, agrupando por key_field e origem
         groups: dict[str, dict[str, list[QgsGeometry]]] = defaultdict(
             lambda: defaultdict(list)
         )
@@ -1109,14 +1162,7 @@ class GeoInterseQDialog(QDialog):
             key_str: str = str(key_val).strip()
             origin_str: str = str(origin_val).strip().lower()
 
-            g2 = QgsGeometry(g)
-            try:
-                g2.transform(tr_ov)
-            except Exception:
-                continue
-            g2 = g2.makeValid()
-
-            groups[key_str][origin_str].append(g2)
+            groups[key_str][origin_str].append(QgsGeometry(g))
 
         origin_base_lower: str = origin_base_value.strip().lower()
         origin_overlay_lower: str = origin_overlay_value.strip().lower()
@@ -1137,26 +1183,34 @@ class GeoInterseQDialog(QDialog):
                 )
                 continue
 
-            # 3. Unir multi-partes da mesma origem
-            geom_base: QgsGeometry = base_geoms[0]
-            for g in base_geoms[1:]:
-                geom_base = geom_base.combine(g)
-            geom_base = geom_base.makeValid()
+            # 3. Fuso UTM do par (centróide conjunto) e projeção das geometrias
+            try:
+                zone: UtmZone = zone_for_geometry(
+                    QgsGeometry.collectGeometry(base_geoms + overlay_geoms), lyr.crs(), ctx
+                )
+                geom_base: QgsGeometry = union_geometries(
+                    [cache.project_to_utm(g, zone) for g in base_geoms]
+                )
+                geom_overlay: QgsGeometry = union_geometries(
+                    [cache.project_to_utm(g, zone) for g in overlay_geoms]
+                )
+            except QgsCsException as exc:
+                QgsMessageLog.logMessage(
+                    f'Falha ao reprojetar o par {key_field}={key_val} para UTM: {exc}',
+                    'GeoInterseQ', Qgis.Warning,
+                )
+                continue
+            self._log_cross_zone(zone, f'{key_field}={key_val}')
 
-            geom_overlay: QgsGeometry = overlay_geoms[0]
-            for g in overlay_geoms[1:]:
-                geom_overlay = geom_overlay.combine(g)
-            geom_overlay = geom_overlay.makeValid()
+            # 4. Calcular áreas individuais (metros planos)
+            area_base_m2: float = geom_base.area()
+            area_overlay_m2: float = geom_overlay.area()
 
-            # 4. Calcular áreas individuais
-            area_base_m2: float = da.measureArea(geom_base)
-            area_overlay_m2: float = da.measureArea(geom_overlay)
-
-            # 5. Calcular interseção
+            # 5. Calcular interseção (metros planos)
             inter_geom: QgsGeometry | None = geom_base.intersection(geom_overlay)
             inter_geom = inter_geom.makeValid() if inter_geom else None
             inter_area_m2: float = (
-                da.measureArea(inter_geom)
+                inter_geom.area()
                 if inter_geom and not inter_geom.isEmpty()
                 else 0.0
             )
@@ -1166,20 +1220,22 @@ class GeoInterseQDialog(QDialog):
                 class_label_zero: str = key_val
                 self._insert_result_row_with_class(
                     _TYPE_VECTOR, lyr.name(), class_label_zero, 0.0, 0.0,
+                    fuso_utm=zone.label,
                 )
                 if out_layer:
                     out_feat = QgsFeature()
                     out_feat.setAttributes([
-                        _TYPE_VECTOR, lyr.name(), class_label_zero,
+                        _TYPE_VECTOR, lyr.name(), class_label_zero, zone.label,
                         0.0, 0.0, 0.0,
                     ])
                     out_layer.dataProvider().addFeatures([out_feat])
                 continue
 
-            # 6. Validação: inter_area <= min(base, overlay)
+            # 6. Validação: inter_area <= min(base, overlay). Em metros planos a propriedade
+            # é satisfeita pelo GEOS a menos de ruído de ponto flutuante (~1e-6 relativo).
             min_area: float = min(area_base_m2, area_overlay_m2)
             warning: bool = False
-            if inter_area_m2 > min_area * 1.001:
+            if inter_area_m2 > min_area * (1.0 + 1e-6):
                 warning = True
                 QgsMessageLog.logMessage(
                     f'AVISO — {key_field}={key_val}: '
@@ -1191,7 +1247,7 @@ class GeoInterseQDialog(QDialog):
 
             # 7. Calcular percentual
             denom: float = area_base_m2 if pct_relative_to_base else area_overlay_m2
-            percent: float = (inter_area_m2 / denom * 100.0) if denom > 0 else 0.0
+            percent: float = safe_percent(inter_area_m2, denom)
 
             # 8. Rótulo da classe
             class_label: str = key_val
@@ -1199,37 +1255,50 @@ class GeoInterseQDialog(QDialog):
             # 9. Inserir resultado na tabela
             self._insert_result_row_with_class(
                 _TYPE_VECTOR, lyr.name(), class_label,
-                inter_area_m2, percent, warning=warning,
+                inter_area_m2, percent, warning=warning, fuso_utm=zone.label,
             )
 
-            # 10. Gravar geometria na camada de saída
+            # 10. Gravar geometria (reprojetada para o CRS do projeto) na camada de saída
             if out_layer and inter_geom and not inter_geom.isEmpty():
+                try:
+                    inter_out: QgsGeometry = cache.utm_to_output(inter_geom, zone)
+                except QgsCsException:
+                    continue
                 out_feat = QgsFeature()
-                out_feat.setGeometry(inter_geom)
+                out_feat.setGeometry(inter_out)
                 out_feat.setAttributes([
-                    _TYPE_VECTOR, lyr.name(), class_label,
+                    _TYPE_VECTOR, lyr.name(), class_label, zone.label,
                     inter_area_m2, inter_area_m2 / 10000.0, percent,
                 ])
                 out_layer.dataProvider().addFeatures([out_feat])
 
     def _process_raster_layer(
-        self, lyr: QgsRasterLayer, base_union: QgsGeometry, base_area_m2: float,
-        crs_measure: QgsCoordinateReferenceSystem, ctx: object,
-        out_layer: QgsVectorLayer | None, base_source_wkt_list: list[str] | None = None,
-        base_source_crs: QgsCoordinateReferenceSystem | None = None
+        self, lyr: QgsRasterLayer, footprint: BaseFootprint,
+        out_crs: QgsCoordinateReferenceSystem, ctx: object,
+        out_layer: QgsVectorLayer | None,
     ) -> None:
         """Processa a interseção espacial com uma camada raster categórica.
 
+        A base e as classes vetorizadas são medidas em UTM plana no fuso do centróide da base.
+
         Args:
             lyr (QgsRasterLayer): Camada raster de entrada.
-            base_union (QgsGeometry): Geometria unificada da base (WGS84).
-            base_area_m2 (float): Área total da base em m².
-            crs_measure (QgsCoordinateReferenceSystem): CRS métrico de cálculo.
+            footprint (BaseFootprint): Base em CRS nativo, materializável em qualquer fuso UTM.
+            out_crs (QgsCoordinateReferenceSystem): CRS das geometrias de saída (projeto).
             ctx (object): Contexto de transformação do projeto.
             out_layer (QgsVectorLayer | None): Camada de memória de saída.
-            base_source_wkt_list (list[str] | None, optional): Lista de WKT originais da base (nativo).
-            base_source_crs (QgsCoordinateReferenceSystem | None, optional): CRS nativo da base.
         """
+        try:
+            utm_zone: UtmZone = footprint.zone()
+            base_area_m2: float = footprint.area_in_zone(utm_zone)
+        except QgsCsException as e:
+            QMessageBox.critical(self, 'Erro de reprojeção', f'Falha ao projetar a base para UTM: {e}')
+            return
+        self._log_cross_zone(utm_zone, f'base × {lyr.name()}')
+        base_wgs84: QgsGeometry = footprint.wgs84_union
+        crs_measure: QgsCoordinateReferenceSystem = wgs84_crs()
+        base_source_crs: QgsCoordinateReferenceSystem = footprint.source_crs
+
         raster_path: str = lyr.source().split('|')[0]
         try:
             ds = gdal.Open(raster_path, gdal.GA_ReadOnly)
@@ -1280,12 +1349,12 @@ class GeoInterseQDialog(QDialog):
 
 
         shapely_geom = None
-        if base_source_wkt_list and base_source_crs is not None and base_source_crs.isValid():
+        if base_source_crs.isValid():
             try:
                 tr_source_to_raster = QgsCoordinateTransform(base_source_crs, raster_crs, ctx)
                 geoms_dst = []
-                for w in base_source_wkt_list:
-                    qg = QgsGeometry.fromWkt(w)
+                for native_geom in footprint.native_geoms:
+                    qg = QgsGeometry(native_geom)
                     if qg.isNull() or qg.isEmpty():
                         continue
                     qg.transform(tr_source_to_raster)
@@ -1305,7 +1374,7 @@ class GeoInterseQDialog(QDialog):
         if shapely_geom is None or shapely_geom.is_empty:
             try:
                 tr_to_raster = QgsCoordinateTransform(crs_measure, raster_crs, ctx)
-                base_in_raster_crs = QgsGeometry(base_union)
+                base_in_raster_crs = QgsGeometry(base_wgs84)
                 base_in_raster_crs.transform(tr_to_raster)
                 base_in_raster_crs = base_in_raster_crs.makeValid()
                 shapely_geom = shapely_wkt.loads(base_in_raster_crs.asWkt())
@@ -1426,18 +1495,10 @@ class GeoInterseQDialog(QDialog):
         from rasterio.features import shapes as rio_shapes
 
 
-        # Inicializa o calculador de área geodésica do QGIS para manter coerência absoluta com o QGIS ($area)
-        da = QgsDistanceArea()
-        ell: str = QgsProject.instance().ellipsoid() or 'WGS84'
-        da.setEllipsoid(ell)
-        da.setSourceCrs(crs_measure, ctx)
+        # Áreas planas em UTM (paridade com area($geometry) do QGIS em UTM); saída no CRS do projeto
         base_area_m2_ref: float = base_area_m2
-
-        # Preparar transformador nativo para reprojetar da projeção do raster para EPSG:4326 (crs_measure)
-        try:
-            tr_raster_to_measure = QgsCoordinateTransform(raster_crs, crs_measure, ctx)
-        except Exception:
-            tr_raster_to_measure = None
+        raster_cache = UtmTransformCache(raster_crs, out_crs, ctx)
+        tr_raster_to_out = QgsCoordinateTransform(raster_crs, out_crs, ctx)
 
         unique_vals: np.ndarray = np.unique(pixel_array[frac > 0])
 
@@ -1462,17 +1523,18 @@ class GeoInterseQDialog(QDialog):
                     merged_intersect = _sh_make_valid(merged_intersect)
                     
                     if not merged_intersect.is_empty:
-                        # Converte para QgsGeometry e reprojeta para o CRS de medição (EPSG:4326)
+                        # Converte para QgsGeometry (CRS do raster) e mede em UTM plana (metros)
                         qgs_geom = QgsGeometry.fromWkt(merged_intersect.wkt)
-                        if tr_raster_to_measure is not None and not qgs_geom.isNull() and not qgs_geom.isEmpty():
-                            qgs_geom.transform(tr_raster_to_measure)
-                            qgs_geom = qgs_geom.makeValid()
-                        
-                        # Calcula a área geodésica elipsoidal oficial alinhada com o QGIS ($area)
-                        class_area_m2 = da.measureArea(qgs_geom) if not qgs_geom.isEmpty() else 0.0
-                        
-                        areas_por_classe_m2[class_val] = class_area_m2
-                        geometrias_por_classe[class_val] = qgs_geom
+                        if not qgs_geom.isNull() and not qgs_geom.isEmpty():
+                            qgs_geom_utm = raster_cache.project_to_utm(qgs_geom, utm_zone)
+                            class_area_m2 = qgs_geom_utm.area() if not qgs_geom_utm.isEmpty() else 0.0
+
+                            # Geometria de exibição: CRS do raster -> CRS do projeto
+                            qgs_geom_out = QgsGeometry(qgs_geom)
+                            qgs_geom_out.transform(tr_raster_to_out)
+
+                            areas_por_classe_m2[class_val] = class_area_m2
+                            geometrias_por_classe[class_val] = qgs_geom_out
             except Exception:
                 # Em caso de qualquer erro na interseção, mantém o cálculo estatístico por fração como fallback
                 class_area_m2 = float(frac[pixel_array == class_val].sum()) * area_pixel_m2
@@ -1533,23 +1595,27 @@ class GeoInterseQDialog(QDialog):
             else:
                 class_label = str(class_val)
 
-            percent: float = (area_m2 / area_classes_total_m2 * 100.0) if area_classes_total_m2 > 0 else 0.0
+            percent: float = safe_percent(area_m2, area_classes_total_m2)
 
-            self._insert_result_row_with_class(_TYPE_RASTER, lyr.name(), class_label, area_m2, percent)
+            self._insert_result_row_with_class(
+                _TYPE_RASTER, lyr.name(), class_label, area_m2, percent, fuso_utm=utm_zone.label
+            )
 
             if out_layer and class_val in geometrias_por_classe:
-                geom_4326 = geometrias_por_classe[class_val]
+                geom_out = geometrias_por_classe[class_val]
                 try:
                     feat = QgsFeature()
-                    feat.setGeometry(geom_4326)
+                    feat.setGeometry(geom_out)
                     feat.setAttributes([
-                        _TYPE_RASTER, lyr.name(), class_label, area_m2, area_m2 / 10000.0, percent
+                        _TYPE_RASTER, lyr.name(), class_label, utm_zone.label,
+                        area_m2, area_m2 / 10000.0, percent
                     ])
                     out_layer.dataProvider().addFeatures([feat])
                 except Exception:
                     feat = QgsFeature()
                     feat.setAttributes([
-                        _TYPE_RASTER, lyr.name(), class_label, area_m2, area_m2 / 10000.0, percent
+                        _TYPE_RASTER, lyr.name(), class_label, utm_zone.label,
+                        area_m2, area_m2 / 10000.0, percent
                     ])
                     out_layer.dataProvider().addFeatures([feat])
 
