@@ -32,7 +32,7 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox
 from qgis.core import QgsMapLayerProxyModel
 
-from .percent_utils import safe_percent
+from .percent_utils import normalize_class_areas, safe_percent
 from .raster_window import align_raster_window
 from .utm_zone import UtmZone
 from .utm_projection import (
@@ -1543,12 +1543,12 @@ class GeoInterseQDialog(QDialog):
                 if class_area_m2 > 0:
                     areas_por_classe_m2[class_val] = class_area_m2
 
-        # Ajuste para evitar que aproximações numéricas na discretização excedam a área de referência do imóvel
-        area_classes_total_m2: float = sum(areas_por_classe_m2.values())
-        if area_classes_total_m2 > base_area_m2_ref * 1.0001:
-            fator: float = base_area_m2_ref / area_classes_total_m2
-            areas_por_classe_m2 = {k: v * fator for k, v in areas_por_classe_m2.items()}
-            area_classes_total_m2 = sum(areas_por_classe_m2.values())
+        # Fechamento contábil de área (paridade com infogeo-valoracao):
+        # Quando o raster cobre integralmente o polígono (resíduo de densificação UTM <= 0,5%)
+        # ou quando a soma excede a área base, normaliza as classes para fechar 100% da área de referência.
+        areas_por_classe_m2, area_classes_total_m2 = normalize_class_areas(
+            areas_por_classe_m2, base_area_m2_ref
+        )
 
         class_names: dict[int, str] = {}
         try:
