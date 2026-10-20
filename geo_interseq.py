@@ -33,6 +33,7 @@ from qgis.gui import QgsMapLayerComboBox
 from qgis.core import QgsMapLayerProxyModel
 
 from .percent_utils import safe_percent
+from .raster_window import align_raster_window
 from .utm_zone import UtmZone
 from .utm_projection import (
     BaseFootprint, UtmTransformCache, union_geometries, wgs84_crs,
@@ -1389,11 +1390,12 @@ class GeoInterseQDialog(QDialog):
 
         _minx, _miny, _maxx, _maxy = shapely_geom.bounds
         with rasterio.open(raster_path) as _src_rio:
-            _window = rasterio.windows.from_bounds(
-                _minx, _miny, _maxx, _maxy,
-                transform=_src_rio.transform
+            src_window = align_raster_window(
+                (_minx, _miny, _maxx, _maxy),
+                _src_rio.transform,
+                _src_rio.width,
+                _src_rio.height,
             )
-            src_window = _window.crop(height=_src_rio.height, width=_src_rio.width)
 
             if src_window.width <= 0 or src_window.height <= 0:
                 QMessageBox.information(

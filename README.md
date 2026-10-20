@@ -5,7 +5,7 @@
   <img src="Logo-GEO-HQ.svg" alt="Logotipo Plataforma Geo e Inovação" height="120" style="vertical-align: middle;">
 </p>
 
-**Versão 1.4.0** | **Autores:** Plat. Geo e Inovação
+**Versão 1.4.1** | **Autores:** Plat. Geo e Inovação
 
 ---
 
@@ -16,6 +16,7 @@ Plugin para o QGIS desenvolvido para calcular a área de interseção e o percen
 ### Principais Funcionalidades
 * **Análise vetor × vetor:** cruzamento espacial por feição, com campo de rótulo configurável.
 * **Análise vetor × raster:** cruzamento espacial por classe (raster categórico inteiro), garantindo paridade numérica com a metodologia adotada pelo InfoGEO e robustez total na reprojeção automática via `QgsCoordinateTransform`.
+* **Alinhamento Exato à Grade Raster (v1.4.1):** janela de leitura do rasterio ancorada estritamente aos índices inteiros da grade matricial com buffer de segurança de 1 pixel (`math.floor`/`math.ceil`), eliminando deslocamento afim sub-pixel e reamostragem Nearest Neighbor no GDAL.
 * **Áreas planas em UTM/SIRGAS 2000 (v1.4.0):** interseções e áreas medidas em metros na projeção UTM do fuso local, com paridade com `area($geometry)` do QGIS e com memoriais/laudos (ver [Metodologia de Cálculo](#metodologia-de-cálculo-de-área)).
 * **Flexibilidade de Escopo:** dois modos de cálculo percentual disponíveis:
   * `% da feição analisada` (ex: quanto da gleba intersecta o imóvel).
