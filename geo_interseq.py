@@ -32,7 +32,8 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox
 from qgis.core import QgsMapLayerProxyModel
 
-from .percent_utils import safe_percent
+from .percent_utils import normalize_class_areas, safe_percent
+from .raster_window import align_raster_window
 from .utm_zone import UtmZone
 from .utm_projection import (
     BaseFootprint, UtmTransformCache, union_geometries, wgs84_crs,
@@ -1389,11 +1390,12 @@ class GeoInterseQDialog(QDialog):
 
         _minx, _miny, _maxx, _maxy = shapely_geom.bounds
         with rasterio.open(raster_path) as _src_rio:
-            _window = rasterio.windows.from_bounds(
-                _minx, _miny, _maxx, _maxy,
-                transform=_src_rio.transform
+            src_window = align_raster_window(
+                (_minx, _miny, _maxx, _maxy),
+                _src_rio.transform,
+                _src_rio.width,
+                _src_rio.height,
             )
-            src_window = _window.crop(height=_src_rio.height, width=_src_rio.width)
 
             if src_window.width <= 0 or src_window.height <= 0:
                 QMessageBox.information(
@@ -1541,12 +1543,12 @@ class GeoInterseQDialog(QDialog):
                 if class_area_m2 > 0:
                     areas_por_classe_m2[class_val] = class_area_m2
 
-        # Ajuste para evitar que aproximações numéricas na discretização excedam a área de referência do imóvel
-        area_classes_total_m2: float = sum(areas_por_classe_m2.values())
-        if area_classes_total_m2 > base_area_m2_ref * 1.0001:
-            fator: float = base_area_m2_ref / area_classes_total_m2
-            areas_por_classe_m2 = {k: v * fator for k, v in areas_por_classe_m2.items()}
-            area_classes_total_m2 = sum(areas_por_classe_m2.values())
+        # Fechamento contábil de área (paridade com infogeo-valoracao):
+        # Quando o raster cobre integralmente o polígono (resíduo de densificação UTM <= 0,5%)
+        # ou quando a soma excede a área base, normaliza as classes para fechar 100% da área de referência.
+        areas_por_classe_m2, area_classes_total_m2 = normalize_class_areas(
+            areas_por_classe_m2, base_area_m2_ref
+        )
 
         class_names: dict[int, str] = {}
         try:
